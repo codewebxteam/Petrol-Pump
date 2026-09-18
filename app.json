@@ -1,14 +1,14 @@
 {
   "expo": {
     "name": "IOCL-Pump-Management",
-    "slug": "IOCL-Pump-Management",
+    "slug": "baijnathsoftware",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "icon": "./assets/pump-logo.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/pump-logo.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
@@ -17,13 +17,22 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
+        "foregroundImage": "./assets/pump-logo.png",
         "backgroundColor": "#ffffff"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.baijnathsoftwaresteam.baijnathsoftware"
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/pump-logo.png"
+    },
+    "plugins": [
+      "@react-native-community/datetimepicker"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "7a887737-075b-48cc-ad4f-b8eff6396a8d"
+      }
     }
   }
 }
