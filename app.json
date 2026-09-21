@@ -2,7 +2,7 @@
   "expo": {
     "name": "IOCL-Pump-Management",
     "slug": "baijnathsoftware",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "sdkVersion": "57.0.0",
     "orientation": "portrait",
     "icon": "./assets/pump-logo.png",
@@ -15,7 +15,8 @@
         "foregroundImage": "./assets/pump-logo.png",
         "backgroundColor": "#ffffff"
       },
-      "package": "com.baijnathsoftwaresteam.baijnathsoftware"
+      "package": "com.baijnathsoftwaresteam.baijnathsoftware",
+      "versionCode": 2
     },
     "web": {
       "favicon": "./assets/pump-logo.png"
@@ -36,8 +37,9 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "7a887737-075b-48cc-ad4f-b8eff6396a8d"
+        "projectId": "ec3fe1d2-0bb9-42a1-b9c5-eb4abda2918d"
       }
-    }
+    },
+    "owner": "codewebx"
   }
 }
