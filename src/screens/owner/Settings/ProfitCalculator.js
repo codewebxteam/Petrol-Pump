@@ -161,6 +161,15 @@ export default function ProfitCalculator() {
       return;
     }
 
+    if (pNum === 0 && dNum === 0) {
+      Toast.show({
+        type: 'info',
+        text1: 'Commission Required',
+        text2: 'Please enter Petrol or Diesel commission rate (₹/L).'
+      });
+      return;
+    }
+
     setIsSavingRates(true);
     try {
       await saveMonthlyCommissionRate(selectedMonth, { petrolRate: pNum, dieselRate: dNum });
@@ -301,6 +310,7 @@ export default function ProfitCalculator() {
 
   const isCurrentMonth = selectedMonth === currentMonthKey;
   const isPreviousMonth = selectedMonth === previousMonthKey;
+  const hasCommissionEntered = (parseFloat(petrolRate) > 0) || (parseFloat(dieselRate) > 0);
   const netProfitValue = calculations.netProfit;
   const isProfitPositive = netProfitValue >= 0;
 
@@ -316,7 +326,7 @@ export default function ProfitCalculator() {
           <Icon name="calculator" size={24} color="#003C8F" />
         </View>
         <View style={{ flex: 1, marginLeft: 12 }}>
-          <Text style={styles.headerTitle}>Profit Calculator (मुनाफा)</Text>
+          <Text style={styles.headerTitle}>Profit Calculator</Text>
           <Text style={styles.headerSubtitle}>
             Monthly commission margin minus staff salary & operating expenses.
           </Text>
@@ -387,7 +397,7 @@ export default function ProfitCalculator() {
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <Icon name="options-outline" size={20} color="#003C8F" />
-          <Text style={styles.cardTitle}>Set Commission Rate (प्रति लीटर कमीशन)</Text>
+          <Text style={styles.cardTitle}>Set Commission Rate</Text>
         </View>
         <Text style={styles.cardSubtitle}>
           Enter profit commission per liter for {formatMonthLabel(selectedMonth)}. Calculations update live:
@@ -446,6 +456,15 @@ export default function ProfitCalculator() {
               </View>
             </View>
 
+            {!hasCommissionEntered && (
+              <View style={styles.rateCallout}>
+                <Icon name="information-circle-outline" size={16} color="#003C8F" style={{ marginRight: 6 }} />
+                <Text style={styles.rateCalloutText}>
+                  Please enter commission rate above to calculate net profit.
+                </Text>
+              </View>
+            )}
+
             <TouchableOpacity
               style={styles.saveRateBtn}
               onPress={handleSaveRates}
@@ -468,29 +487,60 @@ export default function ProfitCalculator() {
       </View>
 
       {/* 4. NET PROFIT SHOWCASE HERO CARD */}
-      <View style={[styles.heroProfitCard, isProfitPositive ? styles.heroProfitPositive : styles.heroProfitNegative]}>
-        <View style={styles.heroTopRow}>
-          <View style={styles.heroBadge}>
-            <Text style={styles.heroBadgeText}>
-              {isProfitPositive ? '✅ NET PROFIT (शुद्ध मुनाफा)' : '⚠️ NET LOSS (घाटा)'}
+      {!hasCommissionEntered ? (
+        <View style={[styles.heroProfitCard, styles.heroProfitPending]}>
+          <View style={styles.heroTopRow}>
+            <View style={[styles.heroBadge, { backgroundColor: '#EFF6FF' }]}>
+              <Text style={[styles.heroBadgeText, { color: '#003C8F' }]}>
+                ℹ️ COMMISSION REQUIRED
+              </Text>
+            </View>
+            <Text style={styles.heroMonthTag}>{formatMonthLabel(selectedMonth)}</Text>
+          </View>
+
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginVertical: 6 }}>
+            <Icon name="create-outline" size={24} color="#003C8F" style={{ marginRight: 8 }} />
+            <Text style={[styles.heroAmount, { color: '#003C8F', fontSize: 24 }]}>
+              Enter Commission Rate
             </Text>
           </View>
-          <Text style={styles.heroMonthTag}>{formatMonthLabel(selectedMonth)}</Text>
+
+          <Text style={styles.heroEquationText}>
+            Please enter Petrol or Diesel commission per liter above to calculate your net profit.
+          </Text>
+
+          <View style={styles.pendingInfoRow}>
+            <Icon name="information-circle" size={16} color="#003C8F" style={{ marginRight: 6 }} />
+            <Text style={styles.pendingInfoText}>
+              Current Deductions: ₹{calculations.totalDeductions.toLocaleString('en-IN', { maximumFractionDigits: 0 })} (Advances + Expenses)
+            </Text>
+          </View>
         </View>
+      ) : (
+        <View style={[styles.heroProfitCard, isProfitPositive ? styles.heroProfitPositive : styles.heroProfitNegative]}>
+          <View style={styles.heroTopRow}>
+            <View style={styles.heroBadge}>
+              <Text style={styles.heroBadgeText}>
+                {isProfitPositive ? '✅ NET PROFIT' : '⚠️ NET LOSS'}
+              </Text>
+            </View>
+            <Text style={styles.heroMonthTag}>{formatMonthLabel(selectedMonth)}</Text>
+          </View>
 
-        <Text style={[styles.heroAmount, isProfitPositive ? styles.heroAmountPositive : styles.heroAmountNegative]}>
-          {isProfitPositive ? '+' : ''}₹{Math.abs(netProfitValue).toLocaleString('en-IN', {
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 0
-          })}
-        </Text>
+          <Text style={[styles.heroAmount, isProfitPositive ? styles.heroAmountPositive : styles.heroAmountNegative]}>
+            {isProfitPositive ? '+' : '-'}₹{Math.abs(netProfitValue).toLocaleString('en-IN', {
+              minimumFractionDigits: 0,
+              maximumFractionDigits: 0
+            })}
+          </Text>
 
-        <Text style={styles.heroEquationText}>
-          Gross Commission (₹{calculations.totalGrossCommission.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
-          {' - '}
-          Staff & Expenses (₹{calculations.totalDeductions.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
-        </Text>
-      </View>
+          <Text style={styles.heroEquationText}>
+            Gross Commission (₹{calculations.totalGrossCommission.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
+            {' - '}
+            Staff & Expenses (₹{calculations.totalDeductions.toLocaleString('en-IN', { maximumFractionDigits: 0 })})
+          </Text>
+        </View>
+      )}
 
       {/* 5. Summary Grid (4 High Impact Cards) */}
       <View style={styles.summaryGrid}>
@@ -505,7 +555,9 @@ export default function ProfitCalculator() {
           <Text style={styles.gridCardSub}>
             Sold: <Text style={{ fontWeight: '700' }}>{calculations.petrolSold.toFixed(1)} L</Text>
             {' • Rate: '}
-            <Text style={{ fontWeight: '700' }}>₹{parseFloat(petrolRate) || 0}/L</Text>
+            <Text style={{ fontWeight: '700' }}>
+              {parseFloat(petrolRate) > 0 ? `₹${parseFloat(petrolRate)}/L` : 'Not set'}
+            </Text>
           </Text>
         </View>
 
@@ -520,7 +572,9 @@ export default function ProfitCalculator() {
           <Text style={styles.gridCardSub}>
             Sold: <Text style={{ fontWeight: '700' }}>{calculations.dieselSold.toFixed(1)} L</Text>
             {' • Rate: '}
-            <Text style={{ fontWeight: '700' }}>₹{parseFloat(dieselRate) || 0}/L</Text>
+            <Text style={{ fontWeight: '700' }}>
+              {parseFloat(dieselRate) > 0 ? `₹${parseFloat(dieselRate)}/L` : 'Not set'}
+            </Text>
           </Text>
         </View>
 
@@ -883,6 +937,41 @@ const styles = StyleSheet.create({
   heroProfitNegative: {
     backgroundColor: '#FEF2F2',
     borderColor: '#FCA5A5'
+  },
+  heroProfitPending: {
+    backgroundColor: '#F0F7FF',
+    borderColor: '#93C5FD'
+  },
+  pendingInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#DBEAFE',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 10
+  },
+  pendingInfoText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  rateCallout: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginTop: 4,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#BFDBFE'
+  },
+  rateCalloutText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F'
   },
   heroTopRow: {
     flexDirection: 'row',

@@ -7,6 +7,8 @@ import { AuthContext } from '../context/AuthContext';
 
 import DailyEntryScreen from '../screens/salesman/DailyEntry/DailyEntryScreen';
 import StaffHistoryScreen from '../screens/salesman/History/StaffHistoryScreen';
+import SampleLabelScreen from '../screens/common/SampleLabel/SampleLabelScreen';
+import AddStockScreen from '../screens/owner/AddStock/AddStockScreen';
 
 const Tab = createBottomTabNavigator();
 
@@ -59,10 +61,14 @@ export default function StaffNavigator({ navigation }) {
           let iconName;
           if (route.name === 'DailyEntry') {
             iconName = focused ? 'create' : 'create-outline';
+          } else if (route.name === 'AddStock') {
+            iconName = focused ? 'water' : 'water-outline';
           } else if (route.name === 'StaffHistory') {
             iconName = focused ? 'time' : 'time-outline';
+          } else if (route.name === 'SampleLabel') {
+            iconName = focused ? 'flask' : 'flask-outline';
           }
-          return <Icon name={iconName} size={24} color={color} />;
+          return <Icon name={iconName} size={22} color={color} />;
         },
         tabBarStyle: {
           paddingBottom: Math.max(insets.bottom, 6),
@@ -74,7 +80,7 @@ export default function StaffNavigator({ navigation }) {
           elevation: 4
         },
         tabBarLabelStyle: {
-          fontSize: 12,
+          fontSize: 10,
           fontWeight: '700'
         }
       })}
@@ -82,12 +88,22 @@ export default function StaffNavigator({ navigation }) {
       <Tab.Screen 
         name="DailyEntry" 
         component={DailyEntryScreen} 
-        options={{ tabBarLabel: 'दैनिक बिक्री (Entry)' }} 
+        options={{ tabBarLabel: 'Daily Entry' }} 
+      />
+      <Tab.Screen 
+        name="AddStock" 
+        component={AddStockScreen} 
+        options={{ tabBarLabel: 'Add Fuel' }} 
       />
       <Tab.Screen 
         name="StaffHistory" 
         component={StaffHistoryScreen} 
-        options={{ tabBarLabel: 'इतिहास (History)' }} 
+        options={{ tabBarLabel: 'History' }} 
+      />
+      <Tab.Screen 
+        name="SampleLabel" 
+        component={SampleLabelScreen} 
+        options={{ tabBarLabel: 'Sample Label' }} 
       />
     </Tab.Navigator>
   );

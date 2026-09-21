@@ -11,6 +11,7 @@ import { generateAndSharePdf } from '../../../utils/generatePdfReceipt';
 
 export default function ReportsScreen() {
   const [activeTab, setActiveTab] = useState('sales'); // 'sales' or 'additions'
+  const [additionsViewMode, setAdditionsViewMode] = useState('day'); // 'day' or 'month'
   
   // Date Picker State
   const [selectedDate, setSelectedDate] = useState(new Date());
@@ -109,24 +110,65 @@ export default function ReportsScreen() {
           setSalaryAdvancesData([]);
         }
       } else {
-        const q = query(
-          collection(db, 'tank_logs'),
-          where('timestamp', '>=', start),
-          where('timestamp', '<=', end),
-          orderBy('timestamp', 'desc'),
-          limit(15)
-        );
-        const snapshot = await getDocs(q);
-        const list = [];
-        snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
-        setAdditionsData(list);
-        
-        if (snapshot.docs.length > 0) {
-          setLastVisible(snapshot.docs[snapshot.docs.length - 1]);
+        let q;
+        if (additionsViewMode === 'month') {
+          const startOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1, 0, 0, 0, 0);
+          const endOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0, 23, 59, 59, 999);
+          q = query(
+            collection(db, 'tank_logs'),
+            where('timestamp', '>=', startOfMonth),
+            where('timestamp', '<=', endOfMonth),
+            orderBy('timestamp', 'desc'),
+            limit(100)
+          );
         } else {
-          setLastVisible(null);
+          q = query(
+            collection(db, 'tank_logs'),
+            where('timestamp', '>=', start),
+            where('timestamp', '<=', end),
+            orderBy('timestamp', 'desc'),
+            limit(50)
+          );
         }
-        setHasMore(snapshot.docs.length === 15);
+
+        try {
+          const snapshot = await getDocs(q);
+          const list = [];
+          snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
+          list.sort((a, b) => {
+            const timeA = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : new Date(a.timestamp || 0).getTime();
+            const timeB = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : new Date(b.timestamp || 0).getTime();
+            return timeB - timeA;
+          });
+          setAdditionsData(list);
+          setLastVisible(null);
+          setHasMore(false);
+        } catch (qErr) {
+          console.warn("Falling back to client-side filtered tank_logs:", qErr.message);
+          const snapAll = await getDocs(query(collection(db, 'tank_logs'), limit(100)));
+          const list = [];
+          snapAll.forEach(doc => {
+            const data = doc.data();
+            const ts = data.timestamp?.toDate ? data.timestamp.toDate() : (data.timestamp ? new Date(data.timestamp) : null);
+            if (ts) {
+              if (additionsViewMode === 'month') {
+                const startOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1, 0, 0, 0, 0);
+                const endOfMonth = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0, 23, 59, 59, 999);
+                if (ts >= startOfMonth && ts <= endOfMonth) list.push({ id: doc.id, ...data });
+              } else {
+                if (ts >= start && ts <= end) list.push({ id: doc.id, ...data });
+              }
+            }
+          });
+          list.sort((a, b) => {
+            const timeA = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : new Date(a.timestamp || 0).getTime();
+            const timeB = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : new Date(b.timestamp || 0).getTime();
+            return timeB - timeA;
+          });
+          setAdditionsData(list);
+          setLastVisible(null);
+          setHasMore(false);
+        }
       }
     } catch (error) {
       console.error("Error fetching reports:", error);
@@ -229,9 +271,9 @@ export default function ReportsScreen() {
 
   useEffect(() => {
     fetchData();
-  }, [activeTab, selectedDate]); 
+  }, [activeTab, selectedDate, additionsViewMode]); 
 
-  // Compute Aggregated Summary
+  // Compute Aggregated Summary for Sales
   const summary = useMemo(() => {
     return salesData.reduce((acc, curr) => {
       const petrolSold = Number(curr.petrolQuantitySold || (curr.fuelType === 'Petrol' ? curr.totalQuantitySold : 0) || 0);
@@ -330,7 +372,7 @@ export default function ReportsScreen() {
               id: key,
               recipientName,
               amount: amt,
-              notes: e.notes || e.reason || 'वेतन / एडवांस (Salary Advance)',
+              notes: e.notes || e.reason || 'Salary Advance',
               shiftStaff,
               machineName: item.machineName || item.machineId || 'Machine',
               reportId: item.id,
@@ -352,7 +394,7 @@ export default function ReportsScreen() {
           id: adv.id,
           recipientName,
           amount: amt,
-          notes: adv.notes || adv.reason || 'वेतन / एडवांस (Salary Advance)',
+          notes: adv.notes || adv.reason || 'Salary Advance',
           shiftStaff: adv.salesmanName || 'Direct Advance',
           machineName: adv.machineName || '-',
           reportId: adv.reportId || '',
@@ -394,7 +436,182 @@ export default function ReportsScreen() {
     return allExpenseEntries.reduce((acc, curr) => acc + Number(curr.amount || 0), 0);
   }, [allExpenseEntries]);
 
+  // Compute Summary for Fuel Additions
+  const additionsSummary = useMemo(() => {
+    let petrolLiters = 0;
+    let dieselLiters = 0;
+    let tankerCount = 0;
+    let testingReturnedLiters = 0;
+
+    additionsData.forEach(item => {
+      if (item.type === 'testing_returned') {
+        testingReturnedLiters += Number(item.petrolTestingLiters || 0) + Number(item.dieselTestingLiters || 0);
+      } else {
+        tankerCount += 1;
+        const pQty = Number(item.petrolAdded || (item.fuelType === 'Petrol' ? item.addedLiters : 0) || 0);
+        const dQty = Number(item.dieselAdded || (item.fuelType === 'Diesel' ? item.addedLiters : 0) || 0);
+        petrolLiters += pQty;
+        dieselLiters += dQty;
+      }
+    });
+
+    return {
+      petrolLiters,
+      dieselLiters,
+      tankerCount,
+      testingReturnedLiters
+    };
+  }, [additionsData]);
+
   const isDaySettled = salesData.length > 0 && salesData.every(item => item.isSettled === true);
+
+  // Generate and Share PDF for Fuel Additions Ledger
+  const generateAdditionsPDF = async () => {
+    try {
+      if (additionsData.length === 0) {
+        Alert.alert("Info", "No fuel addition data available to export.");
+        return;
+      }
+
+      let rowsHtml = '';
+      let sNo = 1;
+      additionsData.forEach(item => {
+        if (item.type === 'testing_returned') return;
+        const isDiesel = item.fuelType === 'Diesel' || item.dieselAdded > 0;
+        const liters = item.addedLiters || (isDiesel ? item.dieselAdded : item.petrolAdded) || 0;
+        const dateStr = item.timestamp?.toDate ? item.timestamp.toDate().toLocaleString('en-IN', {
+          day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'
+        }) : (item.timestamp ? new Date(item.timestamp).toLocaleString('en-IN') : 'N/A');
+
+        rowsHtml += `
+          <tr>
+            <td style="text-align: center;">${sNo++}</td>
+            <td>${dateStr}</td>
+            <td><strong>${item.tankId || 'Tank'}</strong></td>
+            <td style="color: ${isDiesel ? '#003C8F' : '#EA580C'}; font-weight: bold;">${item.fuelType || (isDiesel ? 'Diesel' : 'Petrol')}</td>
+            <td><strong>${item.tankerNumber || 'N/A'}</strong></td>
+            <td>${item.invoiceNumber || 'N/A'}</td>
+            <td>${item.driverName || 'N/A'}</td>
+            <td>${item.driverPhone || 'N/A'}</td>
+            <td>${item.supplier || 'IOCL Baitalpur Depot'}</td>
+            <td style="text-align: right; font-weight: bold;">${parseFloat(liters).toLocaleString('en-IN')} L</td>
+            <td>${item.operatorName || '—'}</td>
+          </tr>
+        `;
+      });
+
+      const monthYearStr = selectedDate.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+      const dateHeading = additionsViewMode === 'month' 
+        ? `Fuel Deliveries Ledger - This Month (${monthYearStr})` 
+        : `Fuel Deliveries Ledger - ${selectedDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}`;
+
+      const html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>Fuel Addition Ledger</title>
+          <style>
+            body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 20px; color: #1E293B; }
+            .header { text-align: center; border-bottom: 2px solid #003C8F; padding-bottom: 12px; margin-bottom: 16px; }
+            .company { font-size: 22px; font-weight: 900; color: #003C8F; margin: 0; }
+            .sub { font-size: 13px; color: #64748B; margin-top: 4px; }
+            .title { font-size: 16px; font-weight: bold; color: #0F172A; margin-top: 10px; }
+            .summary-cards { display: flex; justify-content: space-between; margin-bottom: 16px; gap: 10px; }
+            .card { flex: 1; background: #F8FAFC; border: 1px solid #E2E8F0; padding: 10px; border-radius: 6px; }
+            .card-label { font-size: 11px; color: #64748B; font-weight: bold; }
+            .card-val { font-size: 16px; font-weight: 900; margin-top: 4px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 11px; }
+            th { background-color: #003C8F; color: white; padding: 8px 6px; text-align: left; font-weight: bold; }
+            td { padding: 8px 6px; border-bottom: 1px solid #E2E8F0; }
+            tr:nth-child(even) { background-color: #F8FAFC; }
+            .footer { margin-top: 24px; text-align: center; font-size: 10px; color: #94A3B8; border-top: 1px solid #E2E8F0; padding-top: 8px; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1 class="company">BAIJNATH PETROLEUM</h1>
+            <div class="sub">Indian Oil Dealer (IOCL) • Retail Outlet, Baitalpur</div>
+            <div class="title">${dateHeading}</div>
+          </div>
+
+          <div class="summary-cards">
+            <div class="card" style="border-left: 4px solid #FF6F00;">
+              <div class="card-label">TOTAL PETROL (MS)</div>
+              <div class="card-val" style="color: #FF6F00;">${additionsSummary.petrolLiters.toLocaleString('en-IN')} L</div>
+            </div>
+            <div class="card" style="border-left: 4px solid #003C8F;">
+              <div class="card-label">TOTAL DIESEL (HSD)</div>
+              <div class="card-val" style="color: #003C8F;">${additionsSummary.dieselLiters.toLocaleString('en-IN')} L</div>
+            </div>
+            <div class="card" style="border-left: 4px solid #0284C7;">
+              <div class="card-label">TOTAL FUEL DELIVERED</div>
+              <div class="card-val" style="color: #0284C7;">${(additionsSummary.petrolLiters + additionsSummary.dieselLiters).toLocaleString('en-IN')} L</div>
+            </div>
+            <div class="card" style="border-left: 4px solid #10B981;">
+              <div class="card-label">TANKER DELIVERIES</div>
+              <div class="card-val" style="color: #10B981;">${additionsSummary.tankerCount}</div>
+            </div>
+          </div>
+
+          <table>
+            <thead>
+              <tr>
+                <th style="text-align: center;">S.No</th>
+                <th>Date & Time</th>
+                <th>Tank</th>
+                <th>Fuel</th>
+                <th>Tanker TT No.</th>
+                <th>Challan / Inv</th>
+                <th>Driver Name</th>
+                <th>Driver Mobile</th>
+                <th>Depot</th>
+                <th style="text-align: right;">Quantity</th>
+                <th>Received By</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+
+          <div class="footer">
+            Generated on ${new Date().toLocaleString('en-IN')} • Official Fuel Inventory & Stock Unloading Ledger
+          </div>
+        </body>
+        </html>
+      `;
+
+      const { uri, base64 } = await Print.printToFileAsync({ html, base64: true });
+      let shareUri = uri;
+      try {
+        const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+        if (baseDir && base64) {
+          const destUri = `${baseDir}Fuel_Deliveries_${Date.now()}.pdf`;
+          await FileSystem.writeAsStringAsync(destUri, base64, {
+            encoding: FileSystem.EncodingType.Base64,
+          });
+          shareUri = destUri;
+        }
+      } catch (fsErr) {
+        console.warn('FileSystem additions report write warning:', fsErr);
+      }
+
+      try {
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(shareUri, { UTI: '.pdf', mimeType: 'application/pdf' });
+        } else {
+          await Print.printAsync({ html });
+        }
+      } catch (shareError) {
+        console.warn('Sharing error, falling back to printAsync:', shareError);
+        await Print.printAsync({ html });
+      }
+    } catch (err) {
+      console.error("Error generating additions PDF:", err);
+      Alert.alert("Error", "Could not export fuel additions PDF: " + err.message);
+    }
+  };
 
   const generatePDF = async () => {
     try {
@@ -413,7 +630,7 @@ export default function ReportsScreen() {
           <tr>
             <td><strong>${adv.recipientName}</strong></td>
             <td>${adv.shiftStaff} (${adv.machineName})</td>
-            <td>${adv.notes || 'वेतन / एडवांस'}</td>
+            <td>${adv.notes || 'Salary Advance'}</td>
             <td style="font-weight: bold; color: #B45309;">₹${Number(adv.amount).toFixed(2)}</td>
           </tr>
         `;
@@ -987,7 +1204,7 @@ export default function ReportsScreen() {
                 <div class="payment-pill" style="background-color: #FFFDF7; border-color: #FDE68A;">
                   <div class="payment-pill-title" style="color: #92400E;">💼 Staff Salary & Advances</div>
                   <div class="payment-pill-amount" style="color: #B45309;">₹${totalSalaryAdvanceAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
-                  <div class="payment-pill-sub" style="color: #B45309;">Staff वेतन / एडवांस भुगतान</div>
+                  <div class="payment-pill-sub" style="color: #B45309;">Staff Salary & Advances</div>
                 </div>
               </div>
             </div>
@@ -1022,7 +1239,7 @@ export default function ReportsScreen() {
             ${salaryAdvanceRows ? `
             <div class="section-card">
               <div class="section-header">
-                <h3 class="section-header-title" style="color: #B45309;">4. Staff Salary & Advance Payments (कर्मचारी वेतन / एडवांस)</h3>
+                <h3 class="section-header-title" style="color: #B45309;">4. Staff Salary & Advance Payments Audit</h3>
                 <span class="section-badge" style="background-color: #FEF3C7; color: #92400E;">Total: ₹${totalSalaryAdvanceAmount.toLocaleString('en-IN')}</span>
               </div>
               <table class="data-table">
@@ -1423,7 +1640,7 @@ export default function ReportsScreen() {
                 <Text style={[styles.paymentCardLabel, { color: '#92400E' }]}>Salary Advances</Text>
               </View>
               <Text style={[styles.paymentCardAmount, { color: '#B45309' }]}>₹{totalSalaryAdvanceAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</Text>
-              <Text style={[styles.paymentCardNote, { color: '#B45309' }]}>Staff वेतन / एडवांस</Text>
+              <Text style={[styles.paymentCardNote, { color: '#B45309' }]}>Staff Salary / Advance</Text>
             </View>
           </View>
         </View>
@@ -1501,7 +1718,7 @@ export default function ReportsScreen() {
                     <Text style={[styles.itemizedAmount, { color: '#B45309' }]}>
                       ₹{Number(item.amount || 0).toLocaleString('en-IN')}
                     </Text>
-                    <Text style={styles.salaryTagText}>वेतन / एडवांस</Text>
+                    <Text style={styles.salaryTagText}>Salary Advance</Text>
                   </View>
                 </View>
               ))}
@@ -1842,25 +2059,235 @@ export default function ReportsScreen() {
     );
   };
 
-  const renderAdditionCard = ({ item }) => {
-    const date = item.timestamp?.toDate ? item.timestamp.toDate().toLocaleString('en-IN') : 'N/A';
+  const renderAdditionsSummaryDashboard = () => {
     return (
-      <View style={styles.additionCard}>
-        <View style={styles.cardHeader}>
-          <Text style={styles.date}>{date}</Text>
-          <Text style={styles.nozzle}>{item.tankId || 'Tank'}</Text>
+      <View style={styles.additionsSummaryBox}>
+        <View style={styles.additionsSummaryHeader}>
+          <View>
+            <Text style={styles.additionsSummaryTitle}>Fuel Deliveries & Tank Inventory</Text>
+            <Text style={styles.additionsSummarySub}>
+              {additionsViewMode === 'month' ? `Viewing all deliveries in ${selectedDate.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}` : `Deliveries logged for ${selectedDate.toLocaleDateString('en-IN')}`}
+            </Text>
+          </View>
+          <View style={styles.viewModeToggleRow}>
+            <TouchableOpacity 
+              style={[styles.modePill, additionsViewMode === 'day' && styles.modePillActive]}
+              onPress={() => setAdditionsViewMode('day')}
+            >
+              <Text style={[styles.modePillText, additionsViewMode === 'day' && styles.modePillTextActive]}>Day</Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={[styles.modePill, additionsViewMode === 'month' && styles.modePillActive]}
+              onPress={() => setAdditionsViewMode('month')}
+            >
+              <Text style={[styles.modePillText, additionsViewMode === 'month' && styles.modePillTextActive]}>This Month</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-        <Text style={styles.salesman}>Operator: {item.operatorName || 'Admin'}</Text>
-        <Text style={styles.salesman}>Invoice/Challan: {item.invoiceNumber || 'N/A'}</Text>
-        <View style={styles.statsRow}>
-          <View style={[styles.statBox, { backgroundColor: '#FFF7ED' }]}>
-            <Text style={styles.statLabel}>Petrol Added</Text>
-            <Text style={[styles.statValue, { color: '#EA580C' }]}>{item.petrolAdded || 0} L</Text>
+
+        <View style={styles.additionsSummaryGrid}>
+          <View style={[styles.additionSumCard, { borderLeftColor: '#FF6F00' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Icon name="flame" size={14} color="#FF6F00" style={{ marginRight: 4 }} />
+              <Text style={styles.additionSumLabel}>Petrol (MS) Added</Text>
+            </View>
+            <Text style={[styles.additionSumVal, { color: '#FF6F00' }]}>
+              {additionsSummary.petrolLiters.toLocaleString('en-IN')} L
+            </Text>
           </View>
-          <View style={[styles.statBox, { backgroundColor: '#EFF6FF' }]}>
-            <Text style={styles.statLabel}>Diesel Added</Text>
-            <Text style={[styles.statValue, { color: '#003C8F' }]}>{item.dieselAdded || 0} L</Text>
+
+          <View style={[styles.additionSumCard, { borderLeftColor: '#003C8F' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Icon name="water" size={14} color="#003C8F" style={{ marginRight: 4 }} />
+              <Text style={styles.additionSumLabel}>Diesel (HSD) Added</Text>
+            </View>
+            <Text style={[styles.additionSumVal, { color: '#003C8F' }]}>
+              {additionsSummary.dieselLiters.toLocaleString('en-IN')} L
+            </Text>
           </View>
+        </View>
+
+        <View style={[styles.additionsSummaryGrid, { marginTop: 8 }]}>
+          <View style={[styles.additionSumCard, { borderLeftColor: '#10B981' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Icon name="bus-outline" size={14} color="#10B981" style={{ marginRight: 4 }} />
+              <Text style={styles.additionSumLabel}>Tankers Unloaded</Text>
+            </View>
+            <Text style={[styles.additionSumVal, { color: '#10B981' }]}>
+              {additionsSummary.tankerCount} Deliveries
+            </Text>
+          </View>
+
+          <View style={[styles.additionSumCard, { borderLeftColor: '#0284C7' }]}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Icon name="color-fill-outline" size={14} color="#0284C7" style={{ marginRight: 4 }} />
+              <Text style={styles.additionSumLabel}>Total Fuel Delivered</Text>
+            </View>
+            <Text style={[styles.additionSumVal, { color: '#0284C7' }]}>
+              {(additionsSummary.petrolLiters + additionsSummary.dieselLiters).toLocaleString('en-IN')} L
+            </Text>
+          </View>
+        </View>
+      </View>
+    );
+  };
+
+  const renderAdditionCard = ({ item }) => {
+    const isTestingReturn = item.type === 'testing_returned';
+    const isDiesel = item.fuelType === 'Diesel' || item.dieselAdded > 0;
+    const dateStr = item.timestamp?.toDate ? item.timestamp.toDate().toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    }) : (item.timestamp ? new Date(item.timestamp).toLocaleString('en-IN') : 'N/A');
+
+    if (isTestingReturn) {
+      return (
+        <View style={[styles.additionCard, { borderLeftColor: '#8B5CF6' }]}>
+          <View style={styles.additionCardTop}>
+            <View style={[styles.additionBadge, { backgroundColor: '#F3E8FF' }]}>
+              <Icon name="refresh-circle-outline" size={16} color="#8B5CF6" style={{ marginRight: 4 }} />
+              <Text style={[styles.additionBadgeText, { color: '#8B5CF6' }]}>Shift Testing Returned to Tanks</Text>
+            </View>
+            <Text style={styles.additionDateText}>{dateStr}</Text>
+          </View>
+          <Text style={styles.additionSalesmanText}>
+            Staff: <Text style={{ fontWeight: 'bold', color: '#1E293B' }}>{item.salesmanName || 'Staff'}</Text> • Machine: {item.machineId || 'DU1'}
+          </Text>
+          <View style={styles.statsRow}>
+            <View style={[styles.statBox, { backgroundColor: '#FFF7ED' }]}>
+              <Text style={styles.statLabel}>Petrol Testing Poured Back</Text>
+              <Text style={[styles.statValue, { color: '#EA580C' }]}>{item.petrolTestingLiters || 0} L</Text>
+            </View>
+            <View style={[styles.statBox, { backgroundColor: '#EFF6FF' }]}>
+              <Text style={styles.statLabel}>Diesel Testing Poured Back</Text>
+              <Text style={[styles.statValue, { color: '#003C8F' }]}>{item.dieselTestingLiters || 0} L</Text>
+            </View>
+          </View>
+        </View>
+      );
+    }
+
+    const liters = item.addedLiters || (isDiesel ? item.dieselAdded : item.petrolAdded) || 0;
+
+    return (
+      <View style={[styles.additionCard, { borderLeftColor: isDiesel ? '#003C8F' : '#FF6F00' }]}>
+        <View style={styles.additionCardTop}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={[styles.additionBadge, { backgroundColor: isDiesel ? '#E0EDFF' : '#FFF3E0' }]}>
+              <Icon name={isDiesel ? 'water' : 'flame'} size={14} color={isDiesel ? '#003C8F' : '#FF6F00'} style={{ marginRight: 4 }} />
+              <Text style={[styles.additionBadgeText, { color: isDiesel ? '#003C8F' : '#FF6F00' }]}>
+                {isDiesel ? 'Diesel (HSD)' : 'Petrol (MS)'}
+              </Text>
+            </View>
+            <Text style={styles.additionTankLabel}>{item.tankId || item.tankName || 'Tank'}</Text>
+          </View>
+          <Text style={styles.additionDateText}>{dateStr}</Text>
+        </View>
+
+        {/* Quantity */}
+        <View style={styles.additionMainRow}>
+          <View>
+            <Text style={styles.additionLitersLabel}>UNLOADED QUANTITY</Text>
+            <Text style={[styles.additionLitersValue, { color: isDiesel ? '#003C8F' : '#FF6F00' }]}>
+              +{parseFloat(liters).toLocaleString('en-IN')} L
+            </Text>
+          </View>
+          <View style={styles.additionTypePill}>
+            <Text style={styles.additionTypePillText}>Stock Delivery</Text>
+          </View>
+        </View>
+
+        {/* Delivery Details - Clean 2-Column Grid */}
+        <View style={styles.additionInfoBox}>
+          {/* Row 1: Tanker TT & Challan / Inv */}
+          <View style={styles.additionInfoRow}>
+            <View style={styles.additionInfoCol}>
+              <View style={styles.infoLabelRow}>
+                <Icon name="bus" size={12} color="#0284C7" style={{ marginRight: 5 }} />
+                <Text style={styles.infoFieldLabel}>TANKER TT NO.</Text>
+              </View>
+              <Text style={styles.infoFieldValue} numberOfLines={1}>
+                {item.tankerNumber && item.tankerNumber !== 'N/A' ? item.tankerNumber : '—'}
+              </Text>
+            </View>
+            <View style={styles.additionColDivider} />
+            <View style={styles.additionInfoCol}>
+              <View style={styles.infoLabelRow}>
+                <Icon name="receipt" size={12} color="#059669" style={{ marginRight: 5 }} />
+                <Text style={styles.infoFieldLabel}>CHALLAN / INV</Text>
+              </View>
+              <Text style={styles.infoFieldValue} numberOfLines={1}>
+                {item.invoiceNumber && item.invoiceNumber !== 'N/A' ? item.invoiceNumber : '—'}
+              </Text>
+            </View>
+          </View>
+
+          <View style={styles.additionRowDivider} />
+
+          {/* Row 2: Driver Name & Phone */}
+          <View style={styles.additionInfoRow}>
+            <View style={styles.additionInfoCol}>
+              <View style={styles.infoLabelRow}>
+                <Icon name="person" size={12} color="#6366F1" style={{ marginRight: 5 }} />
+                <Text style={styles.infoFieldLabel}>DRIVER NAME</Text>
+              </View>
+              <Text style={styles.infoFieldValue} numberOfLines={1}>
+                {item.driverName && item.driverName !== 'N/A' ? item.driverName : '—'}
+              </Text>
+            </View>
+            <View style={styles.additionColDivider} />
+            <View style={styles.additionInfoCol}>
+              <View style={styles.infoLabelRow}>
+                <Icon name="call" size={12} color="#D97706" style={{ marginRight: 5 }} />
+                <Text style={styles.infoFieldLabel}>DRIVER MOBILE</Text>
+              </View>
+              <Text style={styles.infoFieldValue} numberOfLines={1}>
+                {item.driverPhone && item.driverPhone !== 'N/A' ? item.driverPhone : '—'}
+              </Text>
+            </View>
+          </View>
+
+          {/* Optional Row 3: Depot & Dip/Density */}
+          {(item.supplier || item.dipReading || item.density) ? (
+            <>
+              <View style={styles.additionRowDivider} />
+              <View style={styles.additionInfoRow}>
+                {item.supplier ? (
+                  <View style={[styles.additionInfoCol, { flex: 1 }]}>
+                    <View style={styles.infoLabelRow}>
+                      <Icon name="business" size={12} color="#64748B" style={{ marginRight: 5 }} />
+                      <Text style={styles.infoFieldLabel}>SUPPLY DEPOT</Text>
+                    </View>
+                    <Text style={styles.infoFieldValue} numberOfLines={1}>{item.supplier}</Text>
+                  </View>
+                ) : null}
+
+                {(item.dipReading || item.density) ? (
+                  <>
+                    {item.supplier ? <View style={styles.additionColDivider} /> : null}
+                    <View style={styles.additionInfoCol}>
+                      <View style={styles.infoLabelRow}>
+                        <Icon name="speedometer" size={12} color="#0F766E" style={{ marginRight: 5 }} />
+                        <Text style={styles.infoFieldLabel}>DIP / DENSITY</Text>
+                      </View>
+                      <Text style={styles.infoFieldValue} numberOfLines={1}>
+                        {[item.dipReading ? `Dip: ${item.dipReading}` : null, item.density ? `Den: ${item.density}` : null].filter(Boolean).join(' • ') || '—'}
+                      </Text>
+                    </View>
+                  </>
+                ) : null}
+              </View>
+            </>
+          ) : null}
+        </View>
+
+        {/* Footer */}
+        <View style={styles.additionCardFooter}>
+          <Text style={styles.footerOperatorText}>Received by: <Text style={{ fontWeight: 'bold' }}>{item.operatorName || '—'}</Text></Text>
+          {item.note && <Text style={styles.additionNoteText}>Note: {item.note}</Text>}
         </View>
       </View>
     );
@@ -1876,6 +2303,12 @@ export default function ReportsScreen() {
         </View>
         {activeTab === 'sales' && salesData.length > 0 && (
           <TouchableOpacity style={styles.topExportBtn} onPress={generatePDF} activeOpacity={0.8}>
+            <Icon name="cloud-download-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
+            <Text style={styles.topExportBtnText}>Export PDF</Text>
+          </TouchableOpacity>
+        )}
+        {activeTab === 'additions' && additionsData.length > 0 && (
+          <TouchableOpacity style={[styles.topExportBtn, { backgroundColor: '#059669' }]} onPress={generateAdditionsPDF} activeOpacity={0.8}>
             <Icon name="cloud-download-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
             <Text style={styles.topExportBtnText}>Export PDF</Text>
           </TouchableOpacity>
@@ -1968,16 +2401,32 @@ export default function ReportsScreen() {
         <FlatList 
           data={activeTab === 'sales' ? salesData : additionsData}
           keyExtractor={item => item.id}
-          ListHeaderComponent={activeTab === 'sales' ? renderSummaryDashboard : null}
+          ListHeaderComponent={activeTab === 'sales' ? renderSummaryDashboard : renderAdditionsSummaryDashboard}
           renderItem={activeTab === 'sales' ? renderSalesCard : renderAdditionCard}
           contentContainerStyle={{ paddingBottom: 30 }}
           ListEmptyComponent={
             <View style={styles.emptyDocWrap}>
-              <Icon name="document-text-outline" size={54} color="#CBD5E1" />
-              <Text style={styles.emptyDocTitle}>No Audit Records Found</Text>
-              <Text style={styles.emptyDocSub}>
-                No shift sales reports were logged on {selectedDate.toLocaleDateString('en-IN')}.
+              <Icon name={activeTab === 'sales' ? "document-text-outline" : "water-outline"} size={54} color="#CBD5E1" />
+              <Text style={styles.emptyDocTitle}>
+                {activeTab === 'sales' ? 'No Audit Records Found' : 'No Fuel Deliveries Found'}
               </Text>
+              <Text style={styles.emptyDocSub}>
+                {activeTab === 'sales' 
+                  ? `No shift sales reports were logged on ${selectedDate.toLocaleDateString('en-IN')}.`
+                  : additionsViewMode === 'month' 
+                    ? `No tanker deliveries found in ${selectedDate.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}.`
+                    : `No fuel tanker deliveries were logged on ${selectedDate.toLocaleDateString('en-IN')}.`
+                }
+              </Text>
+              {activeTab === 'additions' && additionsViewMode === 'day' && (
+                <TouchableOpacity 
+                  style={styles.switchModeEmptyBtn}
+                  onPress={() => setAdditionsViewMode('month')}
+                >
+                  <Icon name="calendar-outline" size={16} color="#003C8F" style={{ marginRight: 6 }} />
+                  <Text style={styles.switchModeEmptyBtnText}>View This Month's Deliveries</Text>
+                </TouchableOpacity>
+              )}
             </View>
           }
           showsVerticalScrollIndicator={false}
@@ -2779,10 +3228,100 @@ const styles = StyleSheet.create({
     marginTop: 2
   },
 
-  // Addition Card
+  // Addition Card Styles
+  additionsSummaryBox: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: '#E2E8F0'
+  },
+  additionsSummaryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    paddingBottom: 10,
+    marginBottom: 10
+  },
+  additionsSummaryTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#0F172A'
+  },
+  additionsSummarySub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2
+  },
+  viewModeToggleRow: {
+    flexDirection: 'row',
+    backgroundColor: '#F1F5F9',
+    borderRadius: 8,
+    padding: 2
+  },
+  modePill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 6
+  },
+  modePillActive: {
+    backgroundColor: '#003C8F'
+  },
+  modePillText: {
+    fontSize: 11,
+    fontWeight: 'bold',
+    color: '#64748B'
+  },
+  modePillTextActive: {
+    color: '#fff'
+  },
+  additionsSummaryGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between'
+  },
+  additionSumCard: {
+    width: '48.5%',
+    backgroundColor: '#F8FAFC',
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderLeftWidth: 4
+  },
+  additionSumLabel: {
+    fontSize: 10,
+    fontWeight: 'bold',
+    color: '#64748B'
+  },
+  additionSumVal: {
+    fontSize: 15,
+    fontWeight: '900',
+    marginTop: 3
+  },
+  switchModeEmptyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    marginTop: 14
+  },
+  switchModeEmptyBtnText: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: '#003C8F'
+  },
+
   additionCard: {
     backgroundColor: '#fff',
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 14,
     marginBottom: 12,
     borderLeftWidth: 5,
@@ -2791,15 +3330,138 @@ const styles = StyleSheet.create({
     borderColor: '#E2E8F0',
     elevation: 2
   },
-  nozzle: {
-    fontSize: 15,
-    fontWeight: 'bold',
-    color: '#003C8F'
+  additionCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8
   },
-  salesman: {
+  additionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6
+  },
+  additionBadgeText: {
+    fontSize: 11,
+    fontWeight: 'bold'
+  },
+  additionTankLabel: {
     fontSize: 13,
-    marginBottom: 4,
-    color: '#475569'
+    fontWeight: '900',
+    color: '#334155',
+    marginLeft: 8
+  },
+  additionDateText: {
+    fontSize: 11,
+    color: '#94A3B8'
+  },
+  additionSalesmanText: {
+    fontSize: 12,
+    color: '#475569',
+    marginBottom: 6
+  },
+  additionMainRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F5F9',
+    paddingBottom: 8,
+    marginBottom: 8
+  },
+  additionLitersLabel: {
+    fontSize: 9,
+    fontWeight: '800',
+    color: '#94A3B8',
+    letterSpacing: 0.5
+  },
+  additionLitersValue: {
+    fontSize: 20,
+    fontWeight: '900',
+    marginTop: 2
+  },
+  additionAmountValue: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#0F172A',
+    marginTop: 2
+  },
+  additionTypePill: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  additionTypePillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+  },
+  additionInfoBox: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginVertical: 6,
+  },
+  additionInfoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 2,
+  },
+  additionInfoCol: {
+    flex: 1,
+  },
+  additionColDivider: {
+    width: 1,
+    backgroundColor: '#E2E8F0',
+    height: 28,
+    marginHorizontal: 10,
+  },
+  additionRowDivider: {
+    height: 1,
+    backgroundColor: '#EDF2F7',
+    marginVertical: 6,
+  },
+  infoLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  infoFieldLabel: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#64748B',
+    letterSpacing: 0.4,
+  },
+  infoFieldValue: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0F172A',
+  },
+  additionCardFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#F8FAFC'
+  },
+  footerOperatorText: {
+    fontSize: 11,
+    color: '#64748B'
+  },
+  additionNoteText: {
+    fontSize: 11,
+    color: '#94A3B8',
+    fontStyle: 'italic'
   },
 
   // Salary Advance Styles

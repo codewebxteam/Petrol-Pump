@@ -242,23 +242,42 @@ export const submitDailyEntry = async (entryData) => {
     try {
       // Petrol Nozzle
       if (petrolEntry?.nozzleId) {
-        await updateDoc(doc(db, 'nozzles', petrolEntry.nozzleId), {
+        const pData = {
+          machineId: machineId,
+          machineName: machineName || machineId,
+          nozzleId: petrolEntry.nozzleId,
+          fuelType: 'Petrol',
           currentMeterReading: petrolEntry.closingMeterReading,
           lastUpdated: new Date(),
           lastSalesmanId: salesmanId,
           lastSalesmanName: salesmanName
-        }).catch(() => null);
+        };
+        await setDoc(doc(db, 'nozzles', petrolEntry.nozzleId), pData, { merge: true }).catch(() => null);
+        await setDoc(doc(db, 'nozzles', `${machineId}-${petrolEntry.nozzleId}`), pData, { merge: true }).catch(() => null);
       }
 
       // Diesel Nozzle
       if (dieselEntry?.nozzleId) {
-        await updateDoc(doc(db, 'nozzles', dieselEntry.nozzleId), {
+        const dData = {
+          machineId: machineId,
+          machineName: machineName || machineId,
+          nozzleId: dieselEntry.nozzleId,
+          fuelType: 'Diesel',
           currentMeterReading: dieselEntry.closingMeterReading,
           lastUpdated: new Date(),
           lastSalesmanId: salesmanId,
           lastSalesmanName: salesmanName
-        }).catch(() => null);
+        };
+        await setDoc(doc(db, 'nozzles', dieselEntry.nozzleId), dData, { merge: true }).catch(() => null);
+        await setDoc(doc(db, 'nozzles', `${machineId}-${dieselEntry.nozzleId}`), dData, { merge: true }).catch(() => null);
       }
+
+      // Also update Machine document with closing meters directly
+      await setDoc(doc(db, 'machines', machineId), {
+        petrolClosingMeter: petrolEntry?.closingMeterReading,
+        dieselClosingMeter: dieselEntry?.closingMeterReading,
+        lastUpdated: new Date()
+      }, { merge: true }).catch(() => null);
 
       // Tank 1 (Petrol Tank): Deduct only net petrol sold (5L testing was returned)
       if (petrolSold > 0) {

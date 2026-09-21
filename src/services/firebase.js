@@ -35,5 +35,5 @@ try {
 }
 
 export const db = getFirestore(app);
-export { auth };
+export { auth, firebaseConfig };
 export default app;

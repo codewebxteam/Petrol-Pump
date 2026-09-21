@@ -1136,7 +1136,7 @@ export default function OwnerDashboardScreen({ navigation }) {
                 <Text style={styles.staffModalStatCardTitle}> Days Present</Text>
               </View>
               <Text style={styles.staffModalStatCardValAtt}>
-                {staffModalAttendance.daysCount} <Text style={{ fontSize: 13, fontWeight: 'normal' }}>Din</Text>
+                {staffModalAttendance.daysCount} <Text style={{ fontSize: 13, fontWeight: 'normal' }}>Days</Text>
               </Text>
               <Text style={styles.staffModalStatCardSub}>
                 {staffModalAttendance.entriesCount} shifts • {staffModalAttendance.totalLiters.toFixed(0)} L sold

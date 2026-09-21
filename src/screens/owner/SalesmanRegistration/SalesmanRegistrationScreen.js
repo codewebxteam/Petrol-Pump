@@ -317,7 +317,7 @@ export default function SalesmanRegistrationScreen() {
                         <Icon name="calendar" size={14} color="#003C8F" />
                         <Text style={styles.modalAttCardLabel}> Days Present</Text>
                       </View>
-                      <Text style={styles.modalAttCardVal}>{modalAtt.daysCount} Din</Text>
+                      <Text style={styles.modalAttCardVal}>{modalAtt.daysCount} Days</Text>
                       <Text style={styles.modalAttCardSub}>
                         {modalAtt.entriesCount} shifts • {modalAtt.totalLiters.toFixed(0)} L sold
                       </Text>

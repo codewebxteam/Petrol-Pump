@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, 
-  SafeAreaView, Modal, KeyboardAvoidingView, Platform, TextInput 
+  Modal, KeyboardAvoidingView, Platform, TextInput 
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { Picker } from '@react-native-picker/picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { collection, onSnapshot, query, where, getDocs } from 'firebase/firestore';

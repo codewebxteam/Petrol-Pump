@@ -12,6 +12,7 @@ import Toast from 'react-native-toast-message';
 import AddStockScreen from '../AddStock/AddStockScreen';
 import SalesmanRegistrationScreen from '../SalesmanRegistration/SalesmanRegistrationScreen';
 import ProfitCalculator from './ProfitCalculator';
+import AdminManagement from './AdminManagement';
 
 // Helper to determine next machine number, name, and nozzles
 const calculateNextMachineInfo = (existingMachines = []) => {
@@ -43,6 +44,15 @@ export default function SettingsScreen() {
   const [machines, setMachines] = useState([]);
   const [nozzles, setNozzles] = useState([]);
   const [tanks, setTanks] = useState([]);
+  const [salesReports, setSalesReports] = useState([]);
+  const [cachedMeters, setCachedMeters] = useState({});
+
+  // Edit Meter Modal State
+  const [isEditMeterModalVisible, setIsEditMeterModalVisible] = useState(false);
+  const [editingMachine, setEditingMachine] = useState(null);
+  const [editPetrolMeter, setEditPetrolMeter] = useState('');
+  const [editDieselMeter, setEditDieselMeter] = useState('');
+  const [isSavingMeters, setIsSavingMeters] = useState(false);
 
   // Machine Form State
   const [newMachineName, setNewMachineName] = useState('');
@@ -88,10 +98,42 @@ export default function SettingsScreen() {
       console.warn("Firestore snapshot error (tanks):", error.message);
     });
 
+    const unsubSales = onSnapshot(collection(db, 'sales_reports'), (snapshot) => {
+      const list = [];
+      snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
+      list.sort((a, b) => {
+        const timeA = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : new Date(a.timestamp || a.date || 0).getTime();
+        const timeB = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : new Date(b.timestamp || b.date || 0).getTime();
+        return timeB - timeA;
+      });
+      setSalesReports(list);
+    }, (error) => {
+      console.warn("Firestore snapshot error (sales_reports):", error.message);
+    });
+
+    const loadCachedMeters = async () => {
+      try {
+        const allKeys = await AsyncStorage.getAllKeys();
+        const meterKeys = allKeys.filter(k => k.startsWith('@meter_'));
+        if (meterKeys.length > 0) {
+          const pairs = await AsyncStorage.multiGet(meterKeys);
+          const map = {};
+          pairs.forEach(([k, v]) => {
+            if (v) map[k] = v;
+          });
+          setCachedMeters(map);
+        }
+      } catch (e) {
+        console.warn("Error loading cached meters:", e);
+      }
+    };
+    loadCachedMeters();
+
     return () => {
       unsubMachines();
       unsubNozzles();
       unsubTanks();
+      unsubSales();
     };
   }, []);
 
@@ -324,14 +366,176 @@ export default function SettingsScreen() {
     }
   };
 
-  const renderMachineCard = ({ item }) => {
+  // Helper to resolve actual meter readings for a machine
+  const getMachineMeters = (item) => {
     const match = String(item.name || item.id || '').match(/\d+/);
     const num = match ? parseInt(match[0], 10) : 1;
     const pNz = item.petrolNozzle || `N${(num - 1) * 2 + 1}`;
     const dNz = item.dieselNozzle || `N${(num - 1) * 2 + 2}`;
 
-    const pDoc = nozzles.find(n => (n.machineId === item.id || n.machineName === item.id) && (n.fuelType === 'Petrol' || n.nozzleId === pNz));
-    const dDoc = nozzles.find(n => (n.machineId === item.id || n.machineName === item.id) && (n.fuelType === 'Diesel' || n.nozzleId === dNz));
+    // Find the latest submitted sale for this machine
+    const latestSale = salesReports.find(s => 
+      s.machineId === item.id || 
+      s.machineName === item.name || 
+      s.machineName === item.id || 
+      s.machineId === item.name ||
+      (item.name && s.machineName && s.machineName.toLowerCase() === item.name.toLowerCase())
+    );
+
+    const pDoc = nozzles.find(n => 
+      (n.machineId === item.id || n.machineName === item.id || n.id === `${item.id}-${pNz}` || n.id === pNz) && 
+      (n.fuelType === 'Petrol' || n.nozzleId === pNz)
+    );
+
+    const dDoc = nozzles.find(n => 
+      (n.machineId === item.id || n.machineName === item.id || n.id === `${item.id}-${dNz}` || n.id === dNz) && 
+      (n.fuelType === 'Diesel' || n.nozzleId === dNz)
+    );
+
+    const pCached = cachedMeters[`@meter_${item.id}_petrol`] || cachedMeters[`@meter_${item.name}_petrol`] || cachedMeters[`@meter_${pNz}`];
+    const dCached = cachedMeters[`@meter_${item.id}_diesel`] || cachedMeters[`@meter_${item.name}_diesel`] || cachedMeters[`@meter_${dNz}`];
+
+    const pCandidates = [
+      latestSale?.petrolEntry?.closingMeterReading,
+      latestSale?.petrolClosingMeter,
+      pDoc?.currentMeterReading,
+      item.petrolClosingMeter,
+      pCached,
+      item.petrolInitialMeter,
+      pDoc?.initialMeterReading,
+    ].filter(v => v !== undefined && v !== null && String(v).trim() !== '');
+
+    const dCandidates = [
+      latestSale?.dieselEntry?.closingMeterReading,
+      latestSale?.dieselClosingMeter,
+      dDoc?.currentMeterReading,
+      item.dieselClosingMeter,
+      dCached,
+      item.dieselInitialMeter,
+      dDoc?.initialMeterReading,
+    ].filter(v => v !== undefined && v !== null && String(v).trim() !== '');
+
+    const pMeter = pCandidates.find(v => String(v) !== '0.0000' && String(v) !== '0' && String(v) !== '0.0') || pCandidates[0] || '0.0000';
+    const dMeter = dCandidates.find(v => String(v) !== '0.0000' && String(v) !== '0' && String(v) !== '0.0') || dCandidates[0] || '0.0000';
+
+    return {
+      petrolNozzle: pNz,
+      dieselNozzle: dNz,
+      petrolMeter: String(pMeter),
+      dieselMeter: String(dMeter),
+      petrolDoc: pDoc,
+      dieselDoc: dDoc,
+      latestSale
+    };
+  };
+
+  const handleOpenEditMeter = (machine) => {
+    const { petrolMeter, dieselMeter } = getMachineMeters(machine);
+    setEditingMachine(machine);
+    setEditPetrolMeter(petrolMeter);
+    setEditDieselMeter(dieselMeter);
+    setIsEditMeterModalVisible(true);
+  };
+
+  const handleSaveMeters = async () => {
+    if (!editingMachine) return;
+    setIsSavingMeters(true);
+    try {
+      const match = String(editingMachine.name || editingMachine.id || '').match(/\d+/);
+      const num = match ? parseInt(match[0], 10) : 1;
+      const pNz = editingMachine.petrolNozzle || `N${(num - 1) * 2 + 1}`;
+      const dNz = editingMachine.dieselNozzle || `N${(num - 1) * 2 + 2}`;
+
+      const pMeterVal = editPetrolMeter.trim() || '0.0000';
+      const dMeterVal = editDieselMeter.trim() || '0.0000';
+
+      // 1. Update machine doc
+      await setDoc(doc(db, 'machines', editingMachine.id), {
+        petrolClosingMeter: pMeterVal,
+        dieselClosingMeter: dMeterVal,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      // 2. Update nozzle docs for petrol (both N1 and DU1-N1 format)
+      await setDoc(doc(db, 'nozzles', pNz), {
+        machineId: editingMachine.id,
+        machineName: editingMachine.name || editingMachine.id,
+        nozzleId: pNz,
+        fuelType: 'Petrol',
+        tankId: 'Tank 1',
+        currentMeterReading: pMeterVal,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      await setDoc(doc(db, 'nozzles', `${editingMachine.id}-${pNz}`), {
+        machineId: editingMachine.id,
+        machineName: editingMachine.name || editingMachine.id,
+        nozzleId: pNz,
+        fuelType: 'Petrol',
+        tankId: 'Tank 1',
+        currentMeterReading: pMeterVal,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      // 3. Update nozzle docs for diesel (both N2 and DU1-N2 format)
+      await setDoc(doc(db, 'nozzles', dNz), {
+        machineId: editingMachine.id,
+        machineName: editingMachine.name || editingMachine.id,
+        nozzleId: dNz,
+        fuelType: 'Diesel',
+        tankId: 'Tank 2',
+        currentMeterReading: dMeterVal,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      await setDoc(doc(db, 'nozzles', `${editingMachine.id}-${dNz}`), {
+        machineId: editingMachine.id,
+        machineName: editingMachine.name || editingMachine.id,
+        nozzleId: dNz,
+        fuelType: 'Diesel',
+        tankId: 'Tank 2',
+        currentMeterReading: dMeterVal,
+        updatedAt: new Date().toISOString()
+      }, { merge: true });
+
+      // 4. Save to AsyncStorage
+      await AsyncStorage.multiSet([
+        [`@meter_${editingMachine.id}_petrol`, pMeterVal],
+        [`@meter_${editingMachine.id}_diesel`, dMeterVal],
+        [`@meter_${editingMachine.name || editingMachine.id}_petrol`, pMeterVal],
+        [`@meter_${editingMachine.name || editingMachine.id}_diesel`, dMeterVal],
+        [`@meter_${pNz}`, pMeterVal],
+        [`@meter_${dNz}`, dMeterVal],
+      ]);
+
+      // Update local cached state
+      setCachedMeters(prev => ({
+        ...prev,
+        [`@meter_${editingMachine.id}_petrol`]: pMeterVal,
+        [`@meter_${editingMachine.id}_diesel`]: dMeterVal,
+        [`@meter_${editingMachine.name || editingMachine.id}_petrol`]: pMeterVal,
+        [`@meter_${editingMachine.name || editingMachine.id}_diesel`]: dMeterVal,
+        [`@meter_${pNz}`]: pMeterVal,
+        [`@meter_${dNz}`]: dMeterVal,
+      }));
+
+      Toast.show({
+        type: 'success',
+        text1: 'Meters Updated',
+        text2: `${editingMachine.name || editingMachine.id} meter readings saved!`
+      });
+
+      setIsEditMeterModalVisible(false);
+    } catch (error) {
+      console.error("Error saving meter readings:", error);
+      Alert.alert("Error", error.message || "Failed to update meter readings.");
+    } finally {
+      setIsSavingMeters(false);
+    }
+  };
+
+  const renderMachineCard = ({ item }) => {
+    const { petrolNozzle: pNz, dieselNozzle: dNz, petrolMeter, dieselMeter } = getMachineMeters(item);
 
     return (
       <View style={styles.machineCard}>
@@ -341,7 +545,18 @@ export default function SettingsScreen() {
           <View style={styles.badge}>
             <Text style={styles.badgeText}>Dual Dispenser (MPD)</Text>
           </View>
-          <TouchableOpacity onPress={() => handleDeleteMachine(item.id)} style={{ marginLeft: 'auto' }}>
+          
+          {/* Edit Meters Button */}
+          <TouchableOpacity 
+            onPress={() => handleOpenEditMeter(item)} 
+            style={styles.editMeterHeaderBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Icon name="create-outline" size={16} color="#fff" />
+            <Text style={styles.editMeterHeaderBtnText}>Edit Meter</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={() => handleDeleteMachine(item.id)} style={{ marginLeft: 10 }}>
             <Icon name="trash-outline" size={22} color="#ffcccc" />
           </TouchableOpacity>
         </View>
@@ -356,9 +571,14 @@ export default function SettingsScreen() {
                 Fuel: <Text style={{ fontWeight: 'bold', color: '#FF6F00' }}>Petrol ➔ Tank 1</Text>
               </Text>
             </View>
-            <View style={styles.meterPill}>
-              <Text style={styles.meterPillText}>Meter: {pDoc?.currentMeterReading || '0.0000'}</Text>
-            </View>
+            <TouchableOpacity 
+              style={[styles.meterPill, { borderColor: '#FED7AA', borderWidth: 1 }]}
+              onPress={() => handleOpenEditMeter(item)}
+            >
+              <Text style={styles.meterPillLabel}>METER</Text>
+              <Text style={styles.meterPillValue}>{petrolMeter}</Text>
+              <Icon name="create-outline" size={12} color="#C2410C" style={{ marginLeft: 4 }} />
+            </TouchableOpacity>
           </View>
 
           {/* Diesel Nozzle */}
@@ -370,9 +590,14 @@ export default function SettingsScreen() {
                 Fuel: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>Diesel ➔ Tank 2</Text>
               </Text>
             </View>
-            <View style={styles.meterPill}>
-              <Text style={styles.meterPillText}>Meter: {dDoc?.currentMeterReading || '0.0000'}</Text>
-            </View>
+            <TouchableOpacity 
+              style={[styles.meterPill, { borderColor: '#BFDBFE', borderWidth: 1 }]}
+              onPress={() => handleOpenEditMeter(item)}
+            >
+              <Text style={styles.meterPillLabel}>METER</Text>
+              <Text style={styles.meterPillValue}>{dieselMeter}</Text>
+              <Icon name="create-outline" size={12} color="#1D4ED8" style={{ marginLeft: 4 }} />
+            </TouchableOpacity>
           </View>
         </View>
       </View>
@@ -417,6 +642,13 @@ export default function SettingsScreen() {
             <Text style={[styles.mainTabText, activeMainTab === 'profit' && { color: '#16A34A', fontWeight: '900' }]}>Profit Calc 💰</Text>
           </TouchableOpacity>
           <TouchableOpacity 
+            style={[styles.mainTab, activeMainTab === 'security' && styles.activeMainTab, activeMainTab === 'security' && { borderColor: '#003C8F', borderWidth: 1 }]}
+            onPress={() => setActiveMainTab('security')}
+          >
+            <Icon name="shield-checkmark-outline" size={15} color={activeMainTab === 'security' ? '#003C8F' : '#64748B'} style={{ marginRight: 5 }} />
+            <Text style={[styles.mainTabText, activeMainTab === 'security' && { color: '#003C8F', fontWeight: '900' }]}>Admin Security 🔐</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
             style={[styles.mainTab, activeMainTab === 'reset' && styles.activeMainTab, activeMainTab === 'reset' && { backgroundColor: '#FEE2E2' }]}
             onPress={() => setActiveMainTab('reset')}
           >
@@ -442,6 +674,12 @@ export default function SettingsScreen() {
       {activeMainTab === 'profit' && (
         <View style={{ flex: 1, marginHorizontal: -15, marginBottom: -15 }}>
           <ProfitCalculator />
+        </View>
+      )}
+
+      {activeMainTab === 'security' && (
+        <View style={{ flex: 1, marginHorizontal: -15, marginBottom: -15 }}>
+          <AdminManagement />
         </View>
       )}
 
@@ -680,6 +918,89 @@ export default function SettingsScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Modal for Editing Machine Meters */}
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={isEditMeterModalVisible}
+        onRequestClose={() => setIsEditMeterModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContentWrapper}>
+            <View style={styles.modalHeader}>
+              <View>
+                <Text style={styles.modalTitle}>Update Meter Readings</Text>
+                <Text style={styles.modalSubTitle}>
+                  {editingMachine ? `${editingMachine.name || editingMachine.id} Dispensers` : 'Adjust current nozzle meters'}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setIsEditMeterModalVisible(false)}>
+                <Icon name="close-circle-outline" size={28} color="#94A3B8" />
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.infoBanner}>
+              <Icon name="information-circle" size={20} color="#003C8F" style={{ marginRight: 8 }} />
+              <Text style={styles.infoBannerText}>
+                Set or adjust current meter readings for this machine. Live daily shift entries will advance automatically from these values.
+              </Text>
+            </View>
+
+            <View style={{ marginTop: 10 }}>
+              {/* Petrol Nozzle Meter */}
+              <View style={[styles.nozzlePreviewCard, { borderColor: '#FF6F00', marginBottom: 12 }]}>
+                <View style={styles.nozzlePreviewHeader}>
+                  <View style={[styles.fuelDot, { backgroundColor: '#FF6F00' }]} />
+                  <Text style={[styles.nozzlePreviewName, { color: '#FF6F00' }]}>
+                    {editingMachine?.petrolNozzle || 'N1'}: Petrol (MS)
+                  </Text>
+                  <View style={[styles.tankBadgeMini, { backgroundColor: '#FFF3E0' }]}>
+                    <Text style={{ color: '#E65100', fontSize: 11, fontWeight: 'bold' }}>Tank 1</Text>
+                  </View>
+                </View>
+                <CustomInput 
+                  label="Current Meter Reading"
+                  value={editPetrolMeter}
+                  onChangeText={setEditPetrolMeter}
+                  keyboardType="numeric"
+                  placeholder="0.0000"
+                  leftIcon="speedometer-outline"
+                />
+              </View>
+
+              {/* Diesel Nozzle Meter */}
+              <View style={[styles.nozzlePreviewCard, { borderColor: '#003C8F' }]}>
+                <View style={styles.nozzlePreviewHeader}>
+                  <View style={[styles.fuelDot, { backgroundColor: '#003C8F' }]} />
+                  <Text style={[styles.nozzlePreviewName, { color: '#003C8F' }]}>
+                    {editingMachine?.dieselNozzle || 'N2'}: Diesel (HSD)
+                  </Text>
+                  <View style={[styles.tankBadgeMini, { backgroundColor: '#E3F2FD' }]}>
+                    <Text style={{ color: '#003C8F', fontSize: 11, fontWeight: 'bold' }}>Tank 2</Text>
+                  </View>
+                </View>
+                <CustomInput 
+                  label="Current Meter Reading"
+                  value={editDieselMeter}
+                  onChangeText={setEditDieselMeter}
+                  keyboardType="numeric"
+                  placeholder="0.0000"
+                  leftIcon="speedometer-outline"
+                />
+              </View>
+            </View>
+
+            <CustomButton 
+              title="Save Meter Readings" 
+              onPress={handleSaveMeters} 
+              loading={isSavingMeters} 
+              type="primary"
+              style={{ marginTop: 20 }} 
+            />
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -731,7 +1052,11 @@ const styles = StyleSheet.create({
   fuelIndicator: { width: 12, height: 12, borderRadius: 6, marginRight: 10 },
   nozzleName: { fontSize: 16, fontWeight: '900', color: '#1E293B', width: 45 },
   nozzleDetail: { fontSize: 13, color: '#64748B' },
-  meterPill: { backgroundColor: '#EEF2F6', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  editMeterHeaderBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.25)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, marginLeft: 'auto' },
+  editMeterHeaderBtnText: { color: '#fff', fontSize: 12, fontWeight: '700', marginLeft: 4 },
+  meterPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F8FAFC', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  meterPillLabel: { fontSize: 9, fontWeight: '800', color: '#64748B', marginRight: 4 },
+  meterPillValue: { fontSize: 12, color: '#0F172A', fontWeight: 'bold' },
   meterPillText: { fontSize: 11, color: '#334155', fontWeight: 'bold' },
 
   resetHeaderBanner: { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FCA5A5', borderRadius: 12, padding: 16, alignItems: 'center', marginBottom: 16 },

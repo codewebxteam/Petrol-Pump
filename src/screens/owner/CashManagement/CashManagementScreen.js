@@ -215,7 +215,9 @@ export default function CashManagementScreen() {
 
   // Difference between counted cash and target deposit amount
   const difference = totalCounted - targetDepositAmount;
-  const isMatched = targetDepositAmount > 0 && difference === 0;
+  const isExactMatch = targetDepositAmount > 0 && difference === 0;
+  // Settable if notes are counted (> 0) and either excess cash (difference >= 0) or shortage is within ₹9 (difference >= -9)
+  const isMatched = targetDepositAmount > 0 && totalCounted > 0 && difference >= -9;
 
   // Pagination calculations for Deposit History (10 items per page)
   const totalHistoryPages = Math.max(1, Math.ceil(bankDeposits.length / DEPOSITS_PER_PAGE));
@@ -276,15 +278,21 @@ export default function CashManagementScreen() {
     if (!isMatched) {
       Alert.alert(
         'Note Count Required',
-        `Physical notes must be counted and match the target amount (₹${targetDepositAmount.toLocaleString('en-IN')}) before settling to bank.\n\nCurrent Counted: ₹${totalCounted.toLocaleString('en-IN')}${totalCounted > 0 ? ` (Difference: ${difference > 0 ? '+' : ''}₹${difference.toLocaleString('en-IN')})` : ''}`
+        `Physical notes must be counted and within ₹9 of target amount (₹${targetDepositAmount.toLocaleString('en-IN')}) or excess to settle.\n\nCurrent Counted: ₹${totalCounted.toLocaleString('en-IN')}${totalCounted > 0 ? ` (Shortage: ₹${Math.abs(difference).toLocaleString('en-IN')})` : ''}`
       );
       if (!showNoteCounter) setShowNoteCounter(true);
       return;
     }
 
+    const differenceNote = difference > 0
+      ? `\n(Includes +₹${difference.toLocaleString('en-IN')} extra cash)`
+      : difference < 0
+        ? `\n(Includes -₹${Math.abs(difference)} change adjustment)`
+        : '';
+
     Alert.alert(
       'Confirm Bank Deposit',
-      `Are you sure you want to settle and deposit ₹${targetDepositAmount.toLocaleString('en-IN')} to the bank?\n\nThis will reset the in-hand cash for the selected ${selectedDates.length} date(s) to ₹0.`,
+      `Are you sure you want to settle and deposit ₹${totalCounted.toLocaleString('en-IN')} to the bank?${differenceNote}\n\nThis will reset the in-hand cash for the selected ${selectedDates.length} date(s) to ₹0.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -301,7 +309,9 @@ export default function CashManagementScreen() {
     try {
       // 1. Create a bank_deposits document
       const depositDocRef = await addDoc(collection(db, 'bank_deposits'), {
-        amount: targetDepositAmount,
+        amount: totalCounted,
+        targetAmount: targetDepositAmount,
+        difference: difference,
         datesCovered: selectedDates,
         datesFormatted: dateGroups
           .filter((g) => selectedDates.includes(g.dateKey))
@@ -329,7 +339,7 @@ export default function CashManagementScreen() {
       Toast.show({
         type: 'success',
         text1: 'Settled to Bank!',
-        text2: `₹${targetDepositAmount.toLocaleString('en-IN')} deposited successfully.`
+        text2: `₹${totalCounted.toLocaleString('en-IN')} deposited successfully.`
       });
 
       // Reset state
@@ -517,7 +527,13 @@ export default function CashManagementScreen() {
                       {showNoteCounter 
                         ? 'Counting active • Tap to close' 
                         : (totalCounted > 0 
-                            ? `Counted: ₹${totalCounted.toLocaleString('en-IN')} ${isMatched ? '(Matched ✓)' : `(Diff: ${difference > 0 ? '+' : ''}₹${difference.toLocaleString('en-IN')})`}`
+                            ? `Counted: ₹${totalCounted.toLocaleString('en-IN')} ${
+                                isExactMatch 
+                                  ? '(Matched ✓)' 
+                                  : isMatched 
+                                    ? (difference > 0 ? `(+₹${difference.toLocaleString('en-IN')} Extra ✓)` : `(-₹${Math.abs(difference)} Change ✓)`)
+                                    : `(Shortage: -₹${Math.abs(difference).toLocaleString('en-IN')})`
+                              }`
                             : 'Mandatory: Tap here to count notes before settling')}
                     </Text>
                   </View>
@@ -591,31 +607,50 @@ export default function CashManagementScreen() {
 
                   {/* Match Verification Status Banner */}
                   {isMatched ? (
-                    <View style={styles.matchBanner}>
-                      <Icon name="checkmark-circle" size={24} color="#15803D" style={{ marginRight: 8 }} />
+                    <View style={[
+                      styles.matchBanner, 
+                      difference !== 0 && { 
+                        backgroundColor: difference > 0 ? '#EFF6FF' : '#F0FDF4', 
+                        borderColor: difference > 0 ? '#93C5FD' : '#86EFAC' 
+                      }
+                    ]}>
+                      <Icon 
+                        name={difference > 0 ? "add-circle" : "checkmark-circle"} 
+                        size={24} 
+                        color={difference > 0 ? "#2563EB" : "#15803D"} 
+                        style={{ marginRight: 8 }} 
+                      />
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.matchBannerTitle}>✓ Amount Matched Exactly!</Text>
-                        <Text style={styles.matchBannerSub}>
-                          Total notes count matches the selected cash of ₹{targetDepositAmount.toLocaleString('en-IN')}.
+                        <Text style={[styles.matchBannerTitle, difference > 0 && { color: '#1E40AF' }]}>
+                          {isExactMatch 
+                            ? '✓ Amount Matched Exactly!' 
+                            : difference > 0 
+                              ? `✓ Ready to Settle (+₹${difference.toLocaleString('en-IN')} Extra Cash)` 
+                              : `✓ Ready to Settle (-₹${Math.abs(difference)} Change Accepted)`}
+                        </Text>
+                        <Text style={[styles.matchBannerSub, difference > 0 && { color: '#1D4ED8' }]}>
+                          {isExactMatch
+                            ? `Total notes count matches the selected cash of ₹${targetDepositAmount.toLocaleString('en-IN')}.`
+                            : difference > 0
+                              ? `Counted: ₹${totalCounted.toLocaleString('en-IN')} (Target: ₹${targetDepositAmount.toLocaleString('en-IN')}). Extra cash of ₹${difference.toLocaleString('en-IN')} will be deposited into bank.`
+                              : `Counted: ₹${totalCounted.toLocaleString('en-IN')} (Target: ₹${targetDepositAmount.toLocaleString('en-IN')}). Shortage of ₹${Math.abs(difference)} is accepted (within ₹10 note limit).`}
                         </Text>
                       </View>
                     </View>
                   ) : difference !== 0 ? (
-                    <View style={[styles.mismatchBanner, { backgroundColor: difference < 0 ? '#FEF2F2' : '#EFF6FF', borderColor: difference < 0 ? '#FCA5A5' : '#BFDBFE' }]}>
+                    <View style={[styles.mismatchBanner, { backgroundColor: '#FEF2F2', borderColor: '#FCA5A5' }]}>
                       <Icon 
-                        name={difference < 0 ? 'alert-circle' : 'information-circle'} 
+                        name="alert-circle" 
                         size={24} 
-                        color={difference < 0 ? '#DC2626' : '#2563EB'} 
+                        color="#DC2626" 
                         style={{ marginRight: 8 }} 
                       />
                       <View style={{ flex: 1 }}>
-                        <Text style={[styles.mismatchTitle, { color: difference < 0 ? '#991B1B' : '#1E40AF' }]}>
-                          {difference < 0 
-                            ? `Shortage: ₹${Math.abs(difference).toLocaleString('en-IN')} remaining` 
-                            : `Excess: ₹${difference.toLocaleString('en-IN')} more counted`}
+                        <Text style={[styles.mismatchTitle, { color: '#991B1B' }]}>
+                          Shortage: ₹{Math.abs(difference).toLocaleString('en-IN')} remaining
                         </Text>
-                        <Text style={[styles.mismatchSub, { color: difference < 0 ? '#B91C1C' : '#3B82F6' }]}>
-                          Required: ₹{targetDepositAmount.toLocaleString('en-IN')} • Counted: ₹{totalCounted.toLocaleString('en-IN')}
+                        <Text style={[styles.mismatchSub, { color: '#B91C1C' }]}>
+                          Required: ₹{targetDepositAmount.toLocaleString('en-IN')} • Counted: ₹{totalCounted.toLocaleString('en-IN')} (Must be within ₹9 change or excess)
                         </Text>
                       </View>
                     </View>
@@ -658,8 +693,8 @@ export default function CashManagementScreen() {
                       />
                       <Text style={styles.settleBtnText}>
                         {isMatched
-                          ? `Settle & Deposit ₹${targetDepositAmount.toLocaleString('en-IN')} to Bank`
-                          : (showNoteCounter ? 'Match Amount to Settle' : 'Count Notes to Enable Settle')}
+                          ? `Settle & Deposit ₹${totalCounted.toLocaleString('en-IN')} to Bank`
+                          : (showNoteCounter ? 'Count Notes to Settle' : 'Count Notes to Enable Settle')}
                       </Text>
                     </>
                   )}
@@ -672,7 +707,7 @@ export default function CashManagementScreen() {
                     style={{ marginTop: 10, alignItems: 'center' }}
                   >
                     <Text style={{ fontSize: 12, color: '#DC2626', fontWeight: '600' }}>
-                      ⚠️ Note count is mandatory. Tap to count notes & activate Settle.
+                      ⚠️ Note count required. Must be within ₹9 of target or excess to settle.
                     </Text>
                   </TouchableOpacity>
                 )}
@@ -796,6 +831,11 @@ export default function CashManagementScreen() {
                         Dates: {item.datesFormatted.join(', ')}
                       </Text>
                     )}
+                    {item.difference ? (
+                      <Text style={{ fontSize: 11, color: item.difference > 0 ? '#1D4ED8' : '#15803D', marginTop: 2, fontWeight: '500' }}>
+                        {item.difference > 0 ? `+₹${item.difference} Extra Cash` : `-₹${Math.abs(item.difference)} Change Adjusted`} (Target: ₹{parseFloat(item.targetAmount || 0).toLocaleString('en-IN')})
+                      </Text>
+                    ) : null}
                   </View>
                   <View style={{ alignItems: 'flex-end' }}>
                     <Text style={styles.historyAmount}>

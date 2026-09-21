@@ -1,102 +1,102 @@
-import React, { useState, useContext } from 'react';
+import React, { useState } from 'react';
 import { 
   View, Text, StyleSheet, KeyboardAvoidingView, Platform, 
-  Alert, TouchableOpacity, Image, ScrollView 
+  Alert, TouchableOpacity, Image, ScrollView, Modal, ActivityIndicator, TextInput
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
 import { auth } from '../../../services/firebase';
-import { AuthContext } from '../../../context/AuthContext';
 import CustomInput from '../../../components/CustomInput';
 import CustomButton from '../../../components/CustomButton';
 import Icon from '@expo/vector-icons/Ionicons';
 
 export default function LoginScreen({ navigation }) {
-  const { loginWithPin, directAdminAccess } = useContext(AuthContext);
-  
-  const [loginMethod, setLoginMethod] = useState('direct'); // 'direct', 'pin', 'email'
-  
-  // PIN State
-  const [pin, setPin] = useState('1234');
-  
   // Email/Pass State
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // 1. Direct 1-Click Access (Zero Password, Zero Wait)
-  const handleDirectAccess = async () => {
-    setLoading(true);
-    try {
-      const res = await directAdminAccess();
-      if (res.success) {
-        navigation.reset({
-          index: 0,
-          routes: [{ name: 'OwnerApp' }]
-        });
-      } else {
-        Alert.alert('Error', res.error || 'Direct access failed');
-      }
-    } catch (e) {
-      Alert.alert('Error', e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // Forgot Password Modal State
+  const [forgotModalVisible, setForgotModalVisible] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [sendingReset, setSendingReset] = useState(false);
 
-  // 2. PIN Login Handler (Super Fast & Reliable)
-  const handlePinLogin = async (customPin) => {
-    const pinToUse = customPin || pin;
-    if (!pinToUse || pinToUse.length < 4) {
-      Alert.alert('Required', 'कृपया 4-अंकों का एडमिन पिन दर्ज करें (डिफ़ॉल्ट: 1234)');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const res = await loginWithPin(pinToUse.trim());
-      if (res.success) {
-        navigation.reset({
-          index: 0,
-          routes: [{ name: 'OwnerApp' }]
-        });
-      } else {
-        Alert.alert('त्रुटि', res.error || 'अमान्य पिन');
-      }
-    } catch (e) {
-      Alert.alert('Error', e.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // 3. Firebase Email/Password Login Handler
+  // Firebase Email/Password Login Handler (Production Standard)
   const handleEmailLogin = async () => {
-    if (!email || !password) {
-      Alert.alert('Required', 'कृपया ईमेल और पासवर्ड दोनों दर्ज करें.');
+    if (!email.trim() || !password) {
+      Alert.alert('Required Fields', 'Please enter both admin email and password.');
       return;
     }
 
     setLoading(true);
     try {
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('कनेक्शन टाइमआउट: कृपया "डायरेक्ट एडमिन" या "पिन" विकल्प का उपयोग करें.')), 8000)
-      );
-
-      await Promise.race([
-        signInWithEmailAndPassword(auth, email.trim(), password),
-        timeoutPromise
-      ]);
+      await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
 
       navigation.reset({
         index: 0,
         routes: [{ name: 'OwnerApp' }]
       });
     } catch (error) {
-      console.error(error);
-      Alert.alert('Login Failed', error.message || 'ईमेल या पासवर्ड गलत है.');
+      console.error("Login error:", error);
+      let errMsg = 'Invalid email or password.';
+      if (error.code === 'auth/user-not-found') {
+        errMsg = 'This email address is not registered as an administrator.';
+      } else if (error.code === 'auth/wrong-password') {
+        errMsg = 'Incorrect password. Please verify and try again.';
+      } else if (error.code === 'auth/invalid-email') {
+        errMsg = 'Invalid email address format.';
+      } else if (error.code === 'auth/too-many-requests') {
+        errMsg = 'Too many failed attempts. Please try again in a few minutes.';
+      }
+      Alert.alert('Login Failed', errMsg);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Open Forgot Password Modal
+  const openForgotPasswordModal = () => {
+    setResetEmail(email.trim());
+    setForgotModalVisible(true);
+  };
+
+  // Send Password Reset Email Handler
+  const handleSendPasswordReset = async () => {
+    const targetEmail = resetEmail.trim().toLowerCase();
+    if (!targetEmail) {
+      Alert.alert('Email Required', 'Please enter your registered admin email address.');
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(targetEmail)) {
+      Alert.alert('Invalid Email', 'Please enter a valid email address format.');
+      return;
+    }
+
+    setSendingReset(true);
+    try {
+      await sendPasswordResetEmail(auth, targetEmail);
+      setForgotModalVisible(false);
+      Alert.alert(
+        '✅ Password Reset Email Sent',
+        `A password reset link has been dispatched to:\n\n${targetEmail}\n\n1. Open your Email Inbox or Spam/Junk folder.\n2. Click the link to set your new password.\n3. Return to this app and log in with your new password.`
+      );
+    } catch (err) {
+      console.error("Forgot password error:", err);
+      let errMsg = err.message || 'Could not send reset email.';
+      if (err.code === 'auth/user-not-found') {
+        errMsg = `No administrator account found with email "${targetEmail}". Please check your email ID.`;
+      } else if (err.code === 'auth/invalid-email') {
+        errMsg = 'Invalid email address format. Please check the entered email.';
+      } else if (err.code === 'auth/too-many-requests') {
+        errMsg = 'Too many requests. Please wait a few moments before trying again.';
+      } else if (err.code === 'auth/network-request-failed') {
+        errMsg = 'Network connection error. Please check your internet connection.';
+      }
+      Alert.alert('Reset Failed', errMsg);
+    } finally {
+      setSendingReset(false);
     }
   };
 
@@ -115,7 +115,7 @@ export default function LoginScreen({ navigation }) {
               }}
             >
               <Icon name="arrow-back-circle" size={24} color="#003C8F" />
-              <Text style={styles.backBtnText}>स्टाफ ऐप पर वापस जाएं (Staff App)</Text>
+              <Text style={styles.backBtnText}>Back to Staff App</Text>
             </TouchableOpacity>
 
             <View style={styles.logoContainer}>
@@ -128,148 +128,110 @@ export default function LoginScreen({ navigation }) {
                 👑 Admin Portal
               </Text>
               <Text style={styles.portalSubText}>
-                मालिक / प्रबंधक पहुंच (Owner & Manager Access)
+                Owner & Manager Secure Access
               </Text>
             </View>
 
-            {/* Toggle Tabs: Direct vs PIN vs Email */}
-            <View style={styles.toggleContainer}>
-              <TouchableOpacity 
-                style={[styles.toggleBtn, loginMethod === 'direct' && styles.toggleBtnActive]}
-                onPress={() => setLoginMethod('direct')}
-              >
-                <Icon name="flash" size={15} color={loginMethod === 'direct' ? '#fff' : '#003C8F'} style={{marginRight: 4}} />
-                <Text style={[styles.toggleText, loginMethod === 'direct' && styles.toggleTextActive]}>
-                  1-क्लिक प्रवेश
-                </Text>
-              </TouchableOpacity>
+            <View style={{ marginTop: 10 }}>
+              <CustomInput
+                label="Admin Email ID"
+                placeholder="admin@iocl.com"
+                leftIcon="mail-outline"
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+              />
+              <CustomInput
+                label="Password"
+                placeholder="••••••••"
+                leftIcon="lock-closed-outline"
+                secureTextEntry={true}
+                value={password}
+                onChangeText={setPassword}
+              />
+
+              <CustomButton 
+                title="LOGIN AS ADMIN" 
+                onPress={handleEmailLogin} 
+                loading={loading} 
+                type="primary"
+                icon="log-in-outline"
+                style={{ marginTop: 10 }}
+              />
 
               <TouchableOpacity 
-                style={[styles.toggleBtn, loginMethod === 'pin' && styles.toggleBtnActive]}
-                onPress={() => setLoginMethod('pin')}
+                style={{ marginTop: 16, alignItems: 'center', padding: 6 }}
+                onPress={openForgotPasswordModal}
               >
-                <Icon name="keypad" size={15} color={loginMethod === 'pin' ? '#fff' : '#003C8F'} style={{marginRight: 4}} />
-                <Text style={[styles.toggleText, loginMethod === 'pin' && styles.toggleTextActive]}>
-                  पिन (1234)
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity 
-                style={[styles.toggleBtn, loginMethod === 'email' && styles.toggleBtnActive]}
-                onPress={() => setLoginMethod('email')}
-              >
-                <Icon name="mail" size={15} color={loginMethod === 'email' ? '#fff' : '#003C8F'} style={{marginRight: 4}} />
-                <Text style={[styles.toggleText, loginMethod === 'email' && styles.toggleTextActive]}>
-                  ईमेल ID
+                <Text style={{ color: '#003C8F', fontSize: 13, fontWeight: 'bold' }}>
+                  Forgot Password?
                 </Text>
               </TouchableOpacity>
             </View>
-
-            {loginMethod === 'direct' && (
-              <View style={{ marginTop: 10 }}>
-                <View style={styles.directBox}>
-                  <Icon name="checkmark-done-circle" size={32} color="#16A34A" />
-                  <Text style={styles.directTitle}>बिना पासवर्ड के तुरंत खोलें</Text>
-                  <Text style={styles.directDesc}>
-                    यदि आप पंप के मालिक हैं और बिना पासवर्ड या लोडिंग की परेशानी के सीधे डैशबोर्ड देखना चाहते हैं:
-                  </Text>
-                </View>
-
-                <CustomButton 
-                  title="🚀 सीधा एडमिन पैनल खोलें (DIRECT ACCESS)" 
-                  onPress={handleDirectAccess} 
-                  loading={loading} 
-                  type="primary"
-                  icon="shield-checkmark-outline"
-                  style={{ marginTop: 16 }}
-                />
-
-                <TouchableOpacity 
-                  style={styles.orPinBtn}
-                  onPress={() => {
-                    setLoginMethod('pin');
-                    handlePinLogin('1234');
-                  }}
-                >
-                  <Text style={styles.orPinText}>या 1234 पिन से तुरंत लॉगिन करें ➔</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {loginMethod === 'pin' && (
-              <View style={{ marginTop: 10 }}>
-                <View style={styles.pinInfoBox}>
-                  <Icon name="information-circle" size={18} color="#0284C7" />
-                  <Text style={styles.pinInfoText}>
-                    डिफ़ॉल्ट एडमिन पिन: <Text style={{fontWeight: 'bold'}}>1234</Text> (तुरंत लॉगिन के लिए)
-                  </Text>
-                </View>
-
-                <CustomInput
-                  label="4-अंकों का एडमिन पिन दर्ज करें"
-                  placeholder="1234"
-                  leftIcon="lock-closed-outline"
-                  secureTextEntry={true}
-                  value={pin}
-                  onChangeText={(t) => setPin(t.replace(/[^0-9]/g, ''))}
-                  keyboardType="numeric"
-                  maxLength={6}
-                />
-
-                <CustomButton 
-                  title="पिन से एडमिन पैनल खोलें" 
-                  onPress={() => handlePinLogin()} 
-                  loading={loading} 
-                  type="primary"
-                  icon="keypad-outline"
-                  style={{ marginTop: 8 }}
-                />
-
-                <CustomButton 
-                  title="⚡ 1-क्लिक डिफ़ॉल्ट (1234) लॉगिन" 
-                  onPress={() => handlePinLogin('1234')} 
-                  loading={loading} 
-                  type="secondary"
-                  icon="flash-outline"
-                  style={{ marginTop: 8 }}
-                />
-              </View>
-            )}
-
-            {loginMethod === 'email' && (
-              <View style={{ marginTop: 10 }}>
-                <CustomInput
-                  label="Admin Email Address"
-                  placeholder="admin@example.com"
-                  leftIcon="mail-outline"
-                  value={email}
-                  onChangeText={setEmail}
-                  keyboardType="email-address"
-                  autoCapitalize="none"
-                />
-                <CustomInput
-                  label="Password"
-                  placeholder="••••••••"
-                  leftIcon="lock-closed-outline"
-                  secureTextEntry={true}
-                  value={password}
-                  onChangeText={setPassword}
-                />
-
-                <CustomButton 
-                  title="LOGIN WITH EMAIL" 
-                  onPress={handleEmailLogin} 
-                  loading={loading} 
-                  type="primary"
-                  icon="log-in-outline"
-                  style={{ marginTop: 8 }}
-                />
-              </View>
-            )}
 
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Forgot Password Modal */}
+      <Modal
+        visible={forgotModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setForgotModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <View style={styles.modalIconWrap}>
+              <Icon name="key-outline" size={28} color="#003C8F" />
+            </View>
+
+            <Text style={styles.modalTitle}>Reset Admin Password</Text>
+            <Text style={styles.modalDesc}>
+              Enter your registered Administrator Email ID below. A secure password reset link will be sent to your inbox:
+            </Text>
+
+            <View style={styles.modalInputWrap}>
+              <Icon name="mail-outline" size={18} color="#64748B" style={{ marginRight: 8 }} />
+              <TextInput
+                style={styles.modalTextInput}
+                placeholder="admin@iocl.com"
+                placeholderTextColor="#94A3B8"
+                value={resetEmail}
+                onChangeText={setResetEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+            </View>
+
+            <TouchableOpacity 
+              style={styles.modalSubmitBtn}
+              onPress={handleSendPasswordReset}
+              disabled={sendingReset}
+              activeOpacity={0.8}
+            >
+              {sendingReset ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <>
+                  <Icon name="send-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
+                  <Text style={styles.modalSubmitBtnText}>SEND RESET LINK</Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.modalCancelBtn}
+              onPress={() => setForgotModalVisible(false)}
+              disabled={sendingReset}
+            >
+              <Text style={styles.modalCancelBtnText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -298,81 +260,89 @@ const styles = StyleSheet.create({
   portalHeading: { fontSize: 22, fontWeight: '900', marginBottom: 4, color: '#003C8F' },
   portalSubText: { fontSize: 13, color: '#64748B', fontWeight: '500' },
 
-  toggleContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#F1F5F9',
-    borderRadius: 12,
-    padding: 4,
-    marginBottom: 16
-  },
-  toggleBtn: {
+  modalOverlay: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
     justifyContent: 'center',
-    paddingVertical: 10,
-    borderRadius: 10
-  },
-  toggleBtnActive: {
-    backgroundColor: '#003C8F',
-    elevation: 2
-  },
-  toggleText: {
-    fontSize: 12,
-    fontWeight: 'bold',
-    color: '#003C8F'
-  },
-  toggleTextActive: {
-    color: '#fff'
-  },
-
-  pinInfoBox: {
-    flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F0F9FF',
-    padding: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#BAE6FD',
+    padding: 20
+  },
+  modalCard: {
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    maxWidth: 380,
+    alignItems: 'center',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8
+  },
+  modalIconWrap: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: '#EFF6FF',
+    justifyContent: 'center',
+    alignItems: 'center',
     marginBottom: 14
   },
-  pinInfoText: {
-    fontSize: 12,
-    color: '#0369A1',
-    marginLeft: 6,
-    flex: 1
-  },
-
-  directBox: {
-    alignItems: 'center',
-    backgroundColor: '#F0FDF4',
-    padding: 16,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#BBF7D0',
-    marginBottom: 4
-  },
-  directTitle: {
-    fontSize: 16,
+  modalTitle: {
+    fontSize: 18,
     fontWeight: '800',
-    color: '#15803D',
-    marginTop: 8,
-    marginBottom: 4
+    color: '#0F172A',
+    marginBottom: 6,
+    textAlign: 'center'
   },
-  directDesc: {
-    fontSize: 12,
-    color: '#166534',
-    textAlign: 'center',
-    lineHeight: 18
-  },
-  orPinBtn: {
-    alignItems: 'center',
-    marginTop: 16,
-    paddingVertical: 8
-  },
-  orPinText: {
+  modalDesc: {
     fontSize: 13,
-    fontWeight: '700',
-    color: '#003C8F'
+    color: '#64748B',
+    textAlign: 'center',
+    lineHeight: 19,
+    marginBottom: 18
+  },
+  modalInputWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    width: '100%',
+    marginBottom: 18
+  },
+  modalTextInput: {
+    flex: 1,
+    fontSize: 14,
+    color: '#0F172A'
+  },
+  modalSubmitBtn: {
+    flexDirection: 'row',
+    backgroundColor: '#003C8F',
+    borderRadius: 12,
+    paddingVertical: 13,
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    elevation: 2
+  },
+  modalSubmitBtnText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold'
+  },
+  modalCancelBtn: {
+    marginTop: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 16
+  },
+  modalCancelBtnText: {
+    color: '#64748B',
+    fontSize: 13,
+    fontWeight: '600'
   }
 });
