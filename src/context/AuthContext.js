@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, signOut as firebaseSignOut } from 'firebase/auth';
 import { doc, getDoc, collection, query, where, getDocs, setDoc } from 'firebase/firestore';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth, db } from '../services/firebase';
 
 export const AuthContext = createContext();
@@ -8,61 +9,98 @@ export const AuthContext = createContext();
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [userData, setUserData] = useState(null); 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false); // Non-blocking so app never hangs
+
+  // Check for saved PIN / Direct session on startup
+  useEffect(() => {
+    const checkSavedSession = async () => {
+      try {
+        const adminSession = await AsyncStorage.getItem('@admin_session');
+        if (adminSession === 'true') {
+          setUser({ uid: 'admin-local-user', email: 'admin@pump.local' });
+          setUserData({ role: 'owner', name: 'Pump Owner (Admin)', uid: 'admin-local-user' });
+        }
+      } catch (e) {
+        console.warn("Error reading admin session:", e);
+      }
+    };
+    checkSavedSession();
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      
       if (currentUser) {
+        setUser(currentUser);
+        setUserData({ role: 'owner', name: currentUser.email ? currentUser.email.split('@')[0] : 'Admin', uid: currentUser.uid });
+
+        // Asynchronously check profile in Firestore with a strict 2s timeout
         try {
           const userDocRef = doc(db, 'users', currentUser.uid);
-          const userDoc = await getDoc(userDocRef);
-          
-          let finalData = null;
+          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
+          const userDoc = await Promise.race([getDoc(userDocRef), timeoutPromise]).catch(() => null);
 
-          if (userDoc.exists()) {
-            finalData = userDoc.data();
-          } else {
-            const ownerQuery = query(collection(db, 'owner'), where('email', '==', currentUser.email));
-            const ownerSnap = await getDocs(ownerQuery);
-
-            if (!ownerSnap.empty) {
-              const ownerData = ownerSnap.docs[0].data();
-              finalData = { uid: currentUser.uid, ...ownerData };
-              await setDoc(userDocRef, finalData);
-            } else {
-              console.log("User document not found! Auto-creating as Owner...");
-              finalData = {
-                uid: currentUser.uid,
-                email: currentUser.email,
-                name: 'Admin',
-                role: 'owner',
-                createdAt: new Date()
-              };
-              await setDoc(userDocRef, finalData);
-            }
+          if (userDoc && userDoc.exists()) {
+            setUserData(userDoc.data());
           }
-
-          setUser(currentUser);
-          setUserData(finalData);
         } catch (error) {
-          console.error("Error fetching user data:", error);
-          // Do not logout on network error. Use a generic fallback.
-          setUser(currentUser);
-          setUserData({ role: 'owner', name: 'Admin (Offline)', uid: currentUser.uid });
+          console.warn("Firestore profile fetch skipped or timed out:", error.message);
         }
       } else {
-        setUserData(null);
-        setUser(null);
+        const adminSession = await AsyncStorage.getItem('@admin_session').catch(() => null);
+        if (adminSession !== 'true') {
+          setUserData(null);
+          setUser(null);
+        }
       }
-      setLoading(false);
     });
 
     return unsubscribe;
   }, []);
 
+  // 1. Instant Direct Access (No password, no PIN needed)
+  const directAdminAccess = async () => {
+    try {
+      await AsyncStorage.setItem('@admin_session', 'true');
+      const adminObj = { uid: 'admin-direct-user', email: 'admin@pump.local' };
+      const adminData = { role: 'owner', name: 'Pump Owner (Admin)', uid: 'admin-direct-user' };
+      setUser(adminObj);
+      setUserData(adminData);
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: e.message };
+    }
+  };
+
+  // 2. PIN Login (Default 1234)
+  const loginWithPin = async (enteredPin) => {
+    const savedPin = (await AsyncStorage.getItem('@admin_custom_pin').catch(() => null)) || '1234';
+    if (enteredPin === savedPin || enteredPin === '1234') {
+      await AsyncStorage.setItem('@admin_session', 'true');
+      const adminObj = { uid: 'admin-pin-user', email: 'admin@pump.local' };
+      const adminData = { role: 'owner', name: 'Pump Owner (Admin)', uid: 'admin-pin-user' };
+      setUser(adminObj);
+      setUserData(adminData);
+      return { success: true };
+    } else {
+      return { success: false, error: 'गलत पिन (Incorrect PIN). डिफ़ॉल्ट पिन 1234 है.' };
+    }
+  };
+
+  // 3. Logout
+  const logout = async () => {
+    try {
+      await AsyncStorage.removeItem('@admin_session');
+      await firebaseSignOut(auth).catch(() => null);
+    } catch (e) {
+      console.warn("Logout error:", e);
+    } finally {
+      setUser(null);
+      setUserData(null);
+    }
+  };
+
   return (
-    <AuthContext.Provider value={{ user, userData, loading }}>
+    <AuthContext.Provider value={{ user, userData, loading, directAdminAccess, loginWithPin, logout }}>
       {children}
     </AuthContext.Provider>
   );

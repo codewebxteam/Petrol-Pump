@@ -1,17 +1,18 @@
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated';
+import Icon from '@expo/vector-icons/Ionicons';
 
 // Animated Liquid Component
-const AnimatedLiquid = ({ percentage, color }) => {
+const AnimatedLiquid = ({ color }) => {
   const heightProgress = useSharedValue(0);
 
   useEffect(() => {
-    heightProgress.value = withSpring(percentage, { 
+    heightProgress.value = withSpring(65, { 
       damping: 15, 
       stiffness: 70 
     });
-  }, [percentage]);
+  }, []);
 
   const animatedStyle = useAnimatedStyle(() => {
     return {
@@ -22,67 +23,81 @@ const AnimatedLiquid = ({ percentage, color }) => {
   return (
     <Animated.View style={[styles.liquid, { backgroundColor: color }, animatedStyle]}>
       {/* 3D Liquid Top Edge Highlight */}
-      <View style={[styles.liquidTopEdge, { backgroundColor: 'rgba(255,255,255,0.4)' }]} />
+      <View style={[styles.liquidTopEdge, { backgroundColor: 'rgba(255,255,255,0.45)' }]} />
     </Animated.View>
   );
 };
 
 export default function TankStockCard({ 
-  tankId, 
-  petrolStock = 0, 
-  dieselStock = 0, 
-  petrolCapacity = 'N/A', 
-  dieselCapacity = 'N/A' 
+  tankId = 'Tank 1',
+  tankName,
+  fuelType,
+  stock,
+  petrolStock, 
+  dieselStock
 }) {
-  const petrolPercentage = petrolCapacity !== 'N/A' && petrolStock ? Math.min((petrolStock / petrolCapacity) * 100, 100) : 0;
-  const dieselPercentage = dieselCapacity !== 'N/A' && dieselStock ? Math.min((dieselStock / dieselCapacity) * 100, 100) : 0;
+  // Determine whether this card is strictly Petrol (Tank 1) or Diesel (Tank 2)
+  const isDiesel = fuelType?.toLowerCase() === 'diesel' || 
+                   String(tankId).toLowerCase().includes('diesel') || 
+                   String(tankName || '').toLowerCase().includes('diesel') ||
+                   String(tankId).includes('2');
+
+  const fuelName = isDiesel ? 'Diesel (HSD)' : 'Petrol (MS)';
+  const tankLabel = isDiesel ? 'Tank 2' : 'Tank 1';
+  const themeColor = isDiesel ? '#003C8F' : '#E65100';
+  const liquidColor = isDiesel ? '#0284C7' : '#FF6F00';
+  const bgTint = isDiesel ? '#F0F7FF' : '#FFF9F2';
+  const borderColor = isDiesel ? '#BFDBFE' : '#FED7AA';
+
+  // Compute live stock in Liters
+  let currentStock = 0;
+  if (stock !== undefined && stock !== null) {
+    currentStock = parseFloat(stock) || 0;
+  } else if (isDiesel) {
+    currentStock = parseFloat(dieselStock) || 0;
+  } else {
+    currentStock = parseFloat(petrolStock) || 0;
+  }
 
   return (
-    <View style={styles.card}>
-      <View style={styles.header}>
-        <Text style={styles.tankId}>{tankId}</Text>
+    <View style={[styles.card, { borderColor: borderColor }]}>
+      {/* Top Header: Tank Identifier & Fuel Badge */}
+      <View style={styles.headerRow}>
+        <View style={[styles.tankBadge, { backgroundColor: themeColor }]}>
+          <Icon name={isDiesel ? "water" : "flame"} size={16} color="#fff" style={{ marginRight: 5 }} />
+          <Text style={styles.tankBadgeText}>{tankLabel}</Text>
+        </View>
+        <View style={[styles.fuelTypePill, { backgroundColor: bgTint, borderColor: themeColor }]}>
+          <Text style={[styles.fuelTypePillText, { color: themeColor }]}>
+            {isDiesel ? '🛢️' : '⛽'} {fuelName}
+          </Text>
+        </View>
       </View>
-      
-      <View style={styles.tanksContainer}>
-        {/* Petrol Tank */}
-        <View style={styles.tankWrapper}>
-          <Text style={[styles.fuelTitle, { color: '#E65100' }]}>PETROL</Text>
-          
-          <View style={[styles.tankCylinder, { backgroundColor: '#FFF3E0', borderColor: '#FFB74D' }]}>
-            <AnimatedLiquid percentage={petrolPercentage} color="#FF6F00" />
-            
-            <View style={styles.glassReflection} />
-            <View style={[styles.marker, { bottom: '25%', backgroundColor: 'rgba(230,81,0,0.3)' }]} />
-            <View style={[styles.marker, { bottom: '50%', backgroundColor: 'rgba(230,81,0,0.3)' }]} />
-            <View style={[styles.marker, { bottom: '75%', backgroundColor: 'rgba(230,81,0,0.3)' }]} />
-          </View>
 
-          <View style={[styles.statsBox, { backgroundColor: '#FFF3E0' }]}>
-            <Text style={[styles.currentStock, { color: '#E65100' }]}>{parseFloat(petrolStock).toFixed(1)} L</Text>
-            {petrolCapacity !== 'N/A' && petrolCapacity ? (
-              <Text style={[styles.capacityText, { color: '#FB8C00' }]}>/ {petrolCapacity} L</Text>
-            ) : null}
-          </View>
+      {/* Main Body: Cylinder + Live Liters Only (No Percentage, No Capacity, No Swatah Wapas) */}
+      <View style={styles.bodyRow}>
+        {/* Animated Cylinder Visual */}
+        <View style={[styles.tankCylinder, { backgroundColor: bgTint, borderColor: themeColor }]}>
+          <AnimatedLiquid color={liquidColor} />
+          
+          <View style={styles.glassReflection} />
+          <View style={[styles.marker, { bottom: '25%', backgroundColor: themeColor }]} />
+          <View style={[styles.marker, { bottom: '50%', backgroundColor: themeColor }]} />
+          <View style={[styles.marker, { bottom: '75%', backgroundColor: themeColor }]} />
         </View>
 
-        {/* Diesel Tank */}
-        <View style={styles.tankWrapper}>
-          <Text style={[styles.fuelTitle, { color: '#003C8F' }]}>DIESEL</Text>
+        {/* Live Stock Display (Liters Only) */}
+        <View style={styles.stockInfo}>
+          <Text style={styles.stockLabel}>Available Stock</Text>
+          <Text style={[styles.currentStockNumber, { color: themeColor }]}>
+            {currentStock.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} L
+          </Text>
           
-          <View style={[styles.tankCylinder, { backgroundColor: '#E3F2FD', borderColor: '#64B5F6' }]}>
-            <AnimatedLiquid percentage={dieselPercentage} color="#003C8F" />
-            
-            <View style={styles.glassReflection} />
-            <View style={[styles.marker, { bottom: '25%', backgroundColor: 'rgba(0,60,143,0.3)' }]} />
-            <View style={[styles.marker, { bottom: '50%', backgroundColor: 'rgba(0,60,143,0.3)' }]} />
-            <View style={[styles.marker, { bottom: '75%', backgroundColor: 'rgba(0,60,143,0.3)' }]} />
-          </View>
-
-          <View style={[styles.statsBox, { backgroundColor: '#E3F2FD' }]}>
-            <Text style={[styles.currentStock, { color: '#003C8F' }]}>{parseFloat(dieselStock).toFixed(1)} L</Text>
-            {dieselCapacity !== 'N/A' && dieselCapacity ? (
-              <Text style={[styles.capacityText, { color: '#1E88E5' }]}>/ {dieselCapacity} L</Text>
-            ) : null}
+          <View style={[styles.statusBadge, { backgroundColor: bgTint }]}>
+            <View style={[styles.statusDot, { backgroundColor: '#16A34A' }]} />
+            <Text style={[styles.statusText, { color: themeColor }]}>
+              {tankLabel} Active
+            </Text>
           </View>
         </View>
       </View>
@@ -90,80 +105,87 @@ export default function TankStockCard({
   );
 }
 
+
 const styles = StyleSheet.create({
   card: {
     backgroundColor: '#fff',
-    padding: 12,
-    borderRadius: 16,
+    borderRadius: 18,
+    padding: 16,
+    borderWidth: 1.5,
     elevation: 3,
-    marginBottom: 10,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.1,
-    shadowRadius: 5,
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    marginBottom: 6,
   },
-  header: {
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 14,
   },
-  tankId: {
-    fontSize: 18,
-    fontWeight: '900',
+  tankBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: 12,
+    elevation: 1,
+  },
+  tankBadgeText: {
     color: '#fff',
-    backgroundColor: '#003C8F',
-    paddingHorizontal: 15,
+    fontSize: 14,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+  fuelTypePill: {
+    paddingHorizontal: 10,
     paddingVertical: 4,
     borderRadius: 12,
-    overflow: 'hidden',
-    elevation: 2
+    borderWidth: 1,
   },
-  tanksContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'flex-end',
-  },
-  tankWrapper: {
-    alignItems: 'center',
-    width: '45%',
-  },
-  fuelTitle: {
+  fuelTypePillText: {
     fontSize: 12,
-    fontWeight: '900',
-    letterSpacing: 1,
-    marginBottom: 8,
+    fontWeight: 'bold',
+  },
+  bodyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 4,
   },
   tankCylinder: {
-    width: 50,
+    width: 62,
     height: 110,
-    borderRadius: 25, 
+    borderRadius: 31,
     borderWidth: 3,
-    justifyContent: 'flex-end', 
+    justifyContent: 'flex-end',
     overflow: 'hidden',
     position: 'relative',
-    marginBottom: 8,
+    marginRight: 16,
   },
   liquid: {
     width: '100%',
     position: 'absolute',
     bottom: 0,
-    borderTopLeftRadius: 10,
-    borderTopRightRadius: 10,
+    borderTopLeftRadius: 14,
+    borderTopRightRadius: 14,
   },
   liquidTopEdge: {
-    height: 5,
+    height: 6,
     width: '100%',
     position: 'absolute',
     top: 0,
-    borderTopLeftRadius: 10,
-    borderTopRightRadius: 10,
+    borderTopLeftRadius: 14,
+    borderTopRightRadius: 14,
   },
   glassReflection: {
     position: 'absolute',
-    top: 5,
-    bottom: 5,
-    left: 6,
+    top: 6,
+    bottom: 6,
+    left: 8,
     width: 8,
-    backgroundColor: 'rgba(255,255,255,0.5)',
+    backgroundColor: 'rgba(255,255,255,0.45)',
     borderRadius: 4,
     zIndex: 2,
   },
@@ -172,21 +194,41 @@ const styles = StyleSheet.create({
     right: 0,
     width: 12,
     height: 2,
+    opacity: 0.35,
     zIndex: 1,
   },
-  statsBox: {
-    alignItems: 'center',
-    padding: 6,
-    borderRadius: 8,
-    width: '100%'
+  stockInfo: {
+    flex: 1,
+    justifyContent: 'center',
   },
-  currentStock: {
-    fontSize: 14,
-    fontWeight: '900',
-  },
-  capacityText: {
-    fontSize: 10,
+  stockLabel: {
+    fontSize: 12,
+    color: '#64748B',
     fontWeight: 'bold',
-    marginTop: 1
-  }
+    marginBottom: 4,
+  },
+  currentStockNumber: {
+    fontSize: 26,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    marginBottom: 8,
+  },
+  statusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+  statusText: {
+    fontSize: 11.5,
+    fontWeight: 'bold',
+  },
 });

@@ -5,6 +5,7 @@ import { db } from '../../../services/firebase';
 import { AuthContext } from '../../../context/AuthContext';
 import Icon from '@expo/vector-icons/Ionicons';
 import DateTimePicker from '@react-native-community/datetimepicker';
+import { generateAndSharePdf } from '../../../utils/generatePdfReceipt';
 
 const FILTER_TYPES = {
   TODAY: 'Today',
@@ -29,6 +30,49 @@ export default function HistoryScreen() {
   const [lastVisible, setLastVisible] = useState(null);
   const [fetchingMore, setFetchingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+
+  const handleDownloadPdf = async (item) => {
+    try {
+      const payload = {
+        staffName: item.salesmanName || (user ? user.displayName || 'Staff' : 'Staff'),
+        machineName: item.machineName || item.machineId || 'Machine',
+        petrolNozzleId: item.petrolNozzleId || 'N1',
+        dieselNozzleId: item.dieselNozzleId || 'N2',
+        petrolOpening: String(item.petrolOpeningMeter || item.openingMeterReading || '0.0000'),
+        petrolClosing: String(item.petrolClosingMeter || item.closingMeterReading || '0.0000'),
+        petrolTesting: Number(item.petrolTesting || item.testingQuantity || 0),
+        petrolNetSold: Number(item.petrolQuantitySold || (item.fuelType === 'Petrol' ? item.quantitySold : 0) || 0),
+        petrolRate: Number(item.petrolRate || (item.fuelType === 'Petrol' ? item.fuelRate : 0) || 0),
+        petrolExpected: Number(item.petrolExpectedAmount || (item.fuelType === 'Petrol' ? item.expectedAmount : 0) || 0),
+        dieselOpening: String(item.dieselOpeningMeter || '0.0000'),
+        dieselClosing: String(item.dieselClosingMeter || '0.0000'),
+        dieselTesting: Number(item.dieselTesting || 0),
+        dieselNetSold: Number(item.dieselQuantitySold || (item.fuelType === 'Diesel' ? item.quantitySold : 0) || 0),
+        dieselRate: Number(item.dieselRate || (item.fuelType === 'Diesel' ? item.fuelRate : 0) || 0),
+        dieselExpected: Number(item.dieselExpectedAmount || (item.fuelType === 'Diesel' ? item.expectedAmount : 0) || 0),
+        totalLitersSold: Number(item.totalQuantitySold || item.quantitySold || 0),
+        totalExpectedAmount: Number(item.expectedTotalAmount || item.expectedAmount || 0),
+        cashAmt: Number(item.cashAmount || 0),
+        cashNotesAmt: Number(item.cashNotesAmount || 0),
+        coinsAmt: Number(item.coinsAmount || 0),
+        digitalAmt: Number(item.onlineAmount || 0) || (Number(item.phonePeAmount || 0) + Number(item.paytmAmount || 0) + Number(item.bharatPeAmount || 0)),
+        digitalEntries: item.digitalPaymentsBreakdown || [],
+        udhariAmt: Number(item.udhariAmount || 0),
+        udhariBreakdown: item.udhariBreakdown || [],
+        expenseAmt: Number(item.expenses || 0),
+        expenseBreakdown: item.expenseBreakdown || [],
+        totalCollection: Number(item.totalPayment || 0),
+        shortageOrExcess: Number(item.shortageOrExcess || 0),
+        udhariReturnTotal: Number(item.udhariReturnAmount || 0),
+        udhariReturnEntries: item.udhariReturnDetails || [],
+        entryDate: item.timestamp?.toDate ? item.timestamp.toDate() : (item.entryDate?.toDate ? item.entryDate.toDate() : new Date())
+      };
+
+      await generateAndSharePdf(payload);
+    } catch (err) {
+      console.error('Download PDF error:', err);
+    }
+  };
 
   const fetchData = async () => {
     if (!user) return;
@@ -197,9 +241,24 @@ export default function HistoryScreen() {
             </View>
           </View>
           
-          <View style={styles.expandToggle}>
-            <Text style={styles.expandText}>{isExpanded ? 'Hide Details' : 'View Details'}</Text>
-            <Icon name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color="#003C8F" />
+          <View style={styles.cardActionsRow}>
+            <TouchableOpacity 
+              style={styles.downloadPdfBtn} 
+              onPress={() => handleDownloadPdf(item)}
+              activeOpacity={0.7}
+            >
+              <Icon name="document-text-outline" size={15} color="#003C8F" />
+              <Text style={styles.downloadPdfBtnText}>📄 PDF रसीद</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity 
+              style={styles.expandToggle}
+              onPress={() => setExpandedId(expandedId === item.id ? null : item.id)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.expandText}>{isExpanded ? 'Hide Details' : 'View Details'}</Text>
+              <Icon name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color="#003C8F" />
+            </TouchableOpacity>
           </View>
         </TouchableOpacity>
 
@@ -227,7 +286,10 @@ export default function HistoryScreen() {
               <Text style={styles.sectionTitle}>Collection Breakdown</Text>
               <View style={styles.breakdownRow}>
                 <Text style={styles.breakdownLabel}>Cash:</Text>
-                <Text style={styles.breakdownValue}>₹{item.cashAmount || 0}</Text>
+                <Text style={styles.breakdownValue}>
+                  ₹{item.cashAmount || 0}
+                  {Number(item.coinsAmount) > 0 ? ` (Notes: ₹${item.cashNotesAmount || ((item.cashAmount || 0) - item.coinsAmount)} • Coins: ₹${item.coinsAmount})` : ''}
+                </Text>
               </View>
               <View style={styles.breakdownRow}>
                 <Text style={styles.breakdownLabel}>PhonePe:</Text>
@@ -255,6 +317,15 @@ export default function HistoryScreen() {
                 <Text style={styles.breakdownValue}>₹{item.expenses || 0}</Text>
               </View>
             </View>
+
+            <TouchableOpacity 
+              style={styles.downloadPdfBtnLarge} 
+              onPress={() => handleDownloadPdf(item)}
+              activeOpacity={0.8}
+            >
+              <Icon name="cloud-download-outline" size={18} color="#fff" />
+              <Text style={styles.downloadPdfBtnLargeText}>Download / Share PDF Receipt</Text>
+            </TouchableOpacity>
           </View>
         )}
       </View>
@@ -430,14 +501,50 @@ const styles = StyleSheet.create({
   shortageBox: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
   shortageText: { fontSize: 13, fontWeight: 'bold' },
 
-  expandToggle: {
+  cardActionsRow: {
     flexDirection: 'row',
-    justifyContent: 'center',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginTop: 10,
     paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: '#F3F4F6'
+  },
+  downloadPdfBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BFDBFE'
+  },
+  downloadPdfBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F',
+    marginLeft: 4
+  },
+  downloadPdfBtnLarge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#003C8F',
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginTop: 14
+  },
+  downloadPdfBtnLargeText: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginLeft: 6
+  },
+  expandToggle: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center'
   },
   expandText: {
     color: '#003C8F',

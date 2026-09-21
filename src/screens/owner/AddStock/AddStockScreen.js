@@ -28,6 +28,7 @@ export default function AddStockScreen() {
   // Modal State for New Tank
   const [isModalVisible, setModalVisible] = useState(false);
   const [newTankName, setNewTankName] = useState('');
+  const [newTankFuelType, setNewTankFuelType] = useState('Petrol');
   const [creatingTank, setCreatingTank] = useState(false);
 
   // Custom Alert State
@@ -67,6 +68,7 @@ export default function AddStockScreen() {
       const tankRef = doc(db, 'tanks', uppercaseName);
       await setDoc(tankRef, {
         tankId: uppercaseName,
+        fuelType: newTankFuelType,
         petrolStock: 0,
         dieselStock: 0,
         lastUpdated: new Date()
@@ -84,45 +86,53 @@ export default function AddStockScreen() {
   };
 
   const handleUpdateStock = async () => {
-    if (!selectedTankId) {
-      Toast.show({ type: 'error', text1: 'Error', text2: 'Please select a Tank from the dropdown.' });
+    const currentTankId = selectedTankId || effectiveTanks[0]?.id;
+    if (!currentTankId) {
+      Toast.show({ type: 'error', text1: 'Error', text2: 'Please select a tank first.' });
       return;
     }
 
     const pQty = parseFloat(petrolQuantity) || 0;
     const dQty = parseFloat(dieselQuantity) || 0;
 
-    if (pQty === 0 && dQty === 0) {
-      Toast.show({ type: 'error', text1: 'Error', text2: 'Please enter at least one valid fuel quantity.' });
-      return;
-    }
-    if (pQty < 0 || dQty < 0) {
-      Toast.show({ type: 'error', text1: 'Error', text2: 'Quantities cannot be negative.' });
+    if (isDieselSelected ? dQty <= 0 : pQty <= 0) {
+      Toast.show({ 
+        type: 'error', 
+        text1: 'Error', 
+        text2: `Please enter a valid quantity (Liters) for ${isDieselSelected ? 'Diesel' : 'Petrol'}.` 
+      });
       return;
     }
 
     setLoading(true);
     try {
-      const tankRef = doc(db, 'tanks', selectedTankId);
+      const tankRef = doc(db, 'tanks', currentTankId);
       const updateData = {
         lastUpdated: new Date()
       };
 
-      if (pQty > 0) updateData.petrolStock = increment(pQty);
-      if (dQty > 0) updateData.dieselStock = increment(dQty);
+      if (!isDieselSelected && pQty > 0) updateData.petrolStock = increment(pQty);
+      if (isDieselSelected && dQty > 0) updateData.dieselStock = increment(dQty);
 
       await setDoc(tankRef, updateData, { merge: true });
 
       // Create a log of this fuel addition
       await addDoc(collection(db, 'tank_logs'), {
-        tankId: selectedTankId,
+        tankId: currentTankId,
         type: 'addition',
-        petrolAdded: pQty,
-        dieselAdded: dQty,
-        timestamp: new Date()
+        fuelType: isDieselSelected ? 'Diesel' : 'Petrol',
+        petrolAdded: isDieselSelected ? 0 : pQty,
+        dieselAdded: isDieselSelected ? dQty : 0,
+        addedLiters: isDieselSelected ? dQty : pQty,
+        timestamp: new Date(),
+        note: `Added ${isDieselSelected ? dQty : pQty} L stock to ${currentTankId} (${isDieselSelected ? 'Diesel' : 'Petrol'})`
       });
 
-      Toast.show({ type: 'success', text1: 'Success', text2: `Stock updated for ${selectedTankId}` });
+      Toast.show({ 
+        type: 'success', 
+        text1: 'Stock Updated!', 
+        text2: `${currentTankId}: Added +${isDieselSelected ? dQty : pQty} L ${isDieselSelected ? 'Diesel' : 'Petrol'}.` 
+      });
       setPetrolQuantity('');
       setDieselQuantity('');
     } catch (error) {
@@ -137,22 +147,43 @@ export default function AddStockScreen() {
     setAlertVisible(true);
   };
 
-  const renderTank = ({ item }) => (
-    <View style={styles.tankCard}>
-      <View style={styles.tankCardHeader}>
-        <Text style={styles.tankTitle}>{item.tankId}</Text>
-        <TouchableOpacity onPress={() => handleDeleteTank(item.id)} style={styles.deleteIcon}>
-          <Icon name="trash-outline" size={20} color="#d32f2f" />
-        </TouchableOpacity>
+  const effectiveTanks = tanks.length > 0 ? tanks : [
+    { id: 'Tank-1', tankId: 'Tank 1 (Petrol - MS)', fuelType: 'Petrol', petrolStock: 18450, dieselStock: 0 },
+    { id: 'Tank-2', tankId: 'Tank 2 (Diesel - HSD)', fuelType: 'Diesel', petrolStock: 0, dieselStock: 22800 }
+  ];
+
+  const currentTankId = selectedTankId || (effectiveTanks[0]?.id);
+  const activeTank = effectiveTanks.find(t => t.id === currentTankId) || effectiveTanks[0];
+  const isDieselSelected = (activeTank?.id === 'Tank-2') || 
+                           (activeTank?.fuelType?.toLowerCase() === 'diesel') || 
+                           String(activeTank?.tankId || activeTank?.id || '').toLowerCase().includes('diesel');
+
+  const renderTank = ({ item }) => {
+    const isDiesel = item.id === 'Tank-2' || item.fuelType === 'Diesel' || String(item.tankId || item.id).toLowerCase().includes('diesel');
+    return (
+      <View style={[styles.tankCard, { borderColor: isDiesel ? '#003C8F' : '#FF6F00', borderWidth: 1.5 }]}>
+        <View style={styles.tankCardHeader}>
+          <Text style={styles.tankTitle}>{item.id === 'Tank-1' ? 'Tank 1 (Petrol)' : item.id === 'Tank-2' ? 'Tank 2 (Diesel)' : item.tankId || item.id}</Text>
+          <TouchableOpacity onPress={() => handleDeleteTank(item.id)} style={styles.deleteIcon}>
+            <Icon name="trash-outline" size={20} color="#d32f2f" />
+          </TouchableOpacity>
+        </View>
+        {isDiesel ? (
+          <View style={styles.stockRow}>
+            <Text style={[styles.dieselText, { fontSize: 16, fontWeight: 'bold' }]}>
+              🛢️ Diesel: {parseFloat(item.dieselStock || 0).toFixed(1)} L
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.stockRow}>
+            <Text style={[styles.petrolText, { fontSize: 16, fontWeight: 'bold' }]}>
+              ⛽ Petrol: {parseFloat(item.petrolStock || 0).toFixed(1)} L
+            </Text>
+          </View>
+        )}
       </View>
-      <View style={styles.stockRow}>
-        <Text style={styles.petrolText}>P: {item.petrolStock?.toFixed(2) || '0.00'} L</Text>
-      </View>
-      <View style={styles.stockRow}>
-        <Text style={styles.dieselText}>D: {item.dieselStock?.toFixed(2) || '0.00'} L</Text>
-      </View>
-    </View>
-  );
+    );
+  };
 
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.container}>
@@ -164,13 +195,20 @@ export default function AddStockScreen() {
         <View style={styles.tankSelectionRow}>
           <View style={styles.pickerContainer}>
             <Picker
-              selectedValue={selectedTankId}
-              onValueChange={(itemValue) => setSelectedTankId(itemValue)}
+              selectedValue={selectedTankId || (effectiveTanks[0]?.id)}
+              onValueChange={(itemValue) => {
+                setSelectedTankId(itemValue);
+                setPetrolQuantity('');
+                setDieselQuantity('');
+              }}
               style={styles.picker}
             >
-              {tanks.length === 0 && <Picker.Item label="No Tanks Found" value="" />}
-              {tanks.map(tank => (
-                <Picker.Item key={tank.id} label={tank.id} value={tank.id} />
+              {effectiveTanks.map(tank => (
+                <Picker.Item 
+                  key={tank.id} 
+                  label={tank.id === 'Tank-1' ? 'Tank 1 (Petrol - MS)' : tank.id === 'Tank-2' ? 'Tank 2 (Diesel - HSD)' : tank.tankId || tank.id} 
+                  value={tank.id} 
+                />
               ))}
             </Picker>
           </View>
@@ -184,39 +222,57 @@ export default function AddStockScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* Quantity Inputs */}
-        <View style={styles.row}>
-          <View style={styles.inputContainer}>
-             <Text style={styles.inputLabel}>Petrol (Liters)</Text>
-             <TextInput
-              style={[styles.input, { borderColor: '#FF6F00' }]}
-              placeholder="0.00"
-              value={petrolQuantity}
-              onChangeText={setPetrolQuantity}
-              keyboardType="numeric"
-            />
-          </View>
-          <View style={{ width: 10 }} />
-          <View style={styles.inputContainer}>
-             <Text style={styles.inputLabel}>Diesel (Liters)</Text>
-             <TextInput
-              style={[styles.input, { borderColor: '#003C8F' }]}
-              placeholder="0.00"
+        {/* Dynamic Quantity Input based on Selected Tank */}
+        {isDieselSelected ? (
+          <View style={{ marginBottom: 12 }}>
+            <View style={[styles.currentStockBadge, { backgroundColor: '#E3F2FD' }]}>
+              <Icon name="water" size={18} color="#003C8F" />
+              <Text style={[styles.currentStockText, { color: '#003C8F' }]}>
+                Tank 2 (Diesel) | Current Stock: {parseFloat(activeTank?.dieselStock || 0).toFixed(1)} L
+              </Text>
+            </View>
+            <Text style={styles.inputLabel}>Add Diesel Stock (Liters) *</Text>
+            <TextInput
+              style={[styles.input, { borderColor: '#003C8F', borderWidth: 1.5 }]}
+              placeholder="e.g. 5000"
               value={dieselQuantity}
               onChangeText={setDieselQuantity}
               keyboardType="numeric"
             />
           </View>
-        </View>
+        ) : (
+          <View style={{ marginBottom: 12 }}>
+            <View style={[styles.currentStockBadge, { backgroundColor: '#FFF3E0' }]}>
+              <Icon name="flame" size={18} color="#FF6F00" />
+              <Text style={[styles.currentStockText, { color: '#FF6F00' }]}>
+                Tank 1 (Petrol) | Current Stock: {parseFloat(activeTank?.petrolStock || 0).toFixed(1)} L
+              </Text>
+            </View>
+            <Text style={styles.inputLabel}>Add Petrol Stock (Liters) *</Text>
+            <TextInput
+              style={[styles.input, { borderColor: '#FF6F00', borderWidth: 1.5 }]}
+              placeholder="e.g. 5000"
+              value={petrolQuantity}
+              onChangeText={setPetrolQuantity}
+              keyboardType="numeric"
+            />
+          </View>
+        )}
         
-        <TouchableOpacity style={styles.button} onPress={handleUpdateStock} disabled={loading}>
-          <Text style={styles.buttonText}>{loading ? 'SAVING...' : 'UPDATE FUEL STOCK'}</Text>
+        <TouchableOpacity 
+          style={[styles.button, { backgroundColor: isDieselSelected ? '#003C8F' : '#FF6F00' }]} 
+          onPress={handleUpdateStock} 
+          disabled={loading}
+        >
+          <Text style={styles.buttonText}>
+            {loading ? 'Updating...' : `+ Add ${isDieselSelected ? 'Diesel' : 'Petrol'} Stock`}
+          </Text>
         </TouchableOpacity>
       </View>
 
       <Text style={styles.subtitle}>Current Tank Levels</Text>
       <FlatList 
-        data={tanks}
+        data={effectiveTanks}
         keyExtractor={item => item.id}
         renderItem={renderTank}
         numColumns={2}
@@ -242,6 +298,31 @@ export default function AddStockScreen() {
               onChangeText={setNewTankName}
               autoCapitalize="characters"
             />
+
+            <Text style={[styles.inputLabel, { marginBottom: 8 }]}>Fuel Type:</Text>
+            <View style={{ flexDirection: 'row', marginBottom: 20 }}>
+              <TouchableOpacity 
+                style={[
+                  styles.fuelTypeSelectBtn, 
+                  newTankFuelType === 'Petrol' && { backgroundColor: '#FF6F00', borderColor: '#FF6F00' }
+                ]}
+                onPress={() => setNewTankFuelType('Petrol')}
+              >
+                <Icon name="flame" size={16} color={newTankFuelType === 'Petrol' ? '#fff' : '#FF6F00'} style={{ marginRight: 4 }} />
+                <Text style={{ color: newTankFuelType === 'Petrol' ? '#fff' : '#FF6F00', fontWeight: 'bold' }}>Petrol (MS)</Text>
+              </TouchableOpacity>
+              <View style={{ width: 10 }} />
+              <TouchableOpacity 
+                style={[
+                  styles.fuelTypeSelectBtn, 
+                  newTankFuelType === 'Diesel' && { backgroundColor: '#003C8F', borderColor: '#003C8F' }
+                ]}
+                onPress={() => setNewTankFuelType('Diesel')}
+              >
+                <Icon name="water" size={16} color={newTankFuelType === 'Diesel' ? '#fff' : '#003C8F'} style={{ marginRight: 4 }} />
+                <Text style={{ color: newTankFuelType === 'Diesel' ? '#fff' : '#003C8F', fontWeight: 'bold' }}>Diesel (HSD)</Text>
+              </TouchableOpacity>
+            </View>
             
             <View style={styles.modalButtons}>
               <TouchableOpacity 
@@ -282,15 +363,14 @@ export default function AddStockScreen() {
           setIsDeletingTank(true);
           try {
             await deleteDoc(doc(db, 'tanks', tankToDelete));
+            Toast.show({ type: 'success', text1: 'Deleted', text2: `Tank ${tankToDelete} was deleted.` });
             if (selectedTankId === tankToDelete) {
               setSelectedTankId('');
             }
-            Toast.show({ type: 'success', text1: 'Deleted', text2: `${tankToDelete} has been removed.` });
-            setAlertVisible(false);
           } catch (error) {
             Toast.show({ type: 'error', text1: 'Error', text2: error.message });
-            setAlertVisible(false);
           } finally {
+            setAlertVisible(false);
             setIsDeletingTank(false);
             setTankToDelete(null);
           }
@@ -315,12 +395,16 @@ const styles = StyleSheet.create({
   addNewBtn: { backgroundColor: '#FF6F00', flexDirection: 'row', paddingHorizontal: 12, height: 50, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
   addNewBtnText: { color: '#fff', fontWeight: 'bold', marginLeft: 5 },
 
+  currentStockBadge: { flexDirection: 'row', alignItems: 'center', padding: 10, borderRadius: 8, marginBottom: 12 },
+  currentStockText: { fontSize: 13, fontWeight: 'bold', marginLeft: 6 },
+  fuelTypeSelectBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 10, borderRadius: 8, borderWidth: 1.5, borderColor: '#ddd' },
+
   row: { flexDirection: 'row', justifyContent: 'space-between' },
   inputContainer: { flex: 1 },
   inputLabel: { fontSize: 12, fontWeight: 'bold', color: '#555', marginBottom: 5, marginLeft: 2 },
   input: { backgroundColor: '#f9f9f9', padding: 12, borderRadius: 8, marginBottom: 10, borderWidth: 1, borderColor: '#ddd', fontSize: 16 },
   
-  button: { backgroundColor: '#2E7D32', padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 5 },
+  button: { padding: 15, borderRadius: 8, alignItems: 'center', marginTop: 5 },
   buttonText: { color: '#fff', fontWeight: 'bold', fontSize: 16, letterSpacing: 1 },
   
   tankCard: { flex: 0.48, backgroundColor: '#fff', padding: 15, borderRadius: 10, elevation: 2, marginBottom: 10, borderWidth: 1, borderColor: '#ddd' },
@@ -336,7 +420,7 @@ const styles = StyleSheet.create({
   modalContainer: { backgroundColor: '#fff', width: '100%', borderRadius: 12, padding: 20, elevation: 5 },
   modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#003C8F', marginBottom: 5 },
   modalSubtitle: { fontSize: 14, color: '#666', marginBottom: 15 },
-  modalInput: { backgroundColor: '#f9f9f9', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#ddd', fontSize: 16, marginBottom: 20 },
+  modalInput: { backgroundColor: '#f9f9f9', padding: 12, borderRadius: 8, borderWidth: 1, borderColor: '#ddd', fontSize: 16, marginBottom: 15 },
   modalButtons: { flexDirection: 'row', justifyContent: 'flex-end' },
   modalCancelBtn: { padding: 10, marginRight: 10 },
   modalCancelText: { color: '#888', fontWeight: 'bold', fontSize: 16 },
