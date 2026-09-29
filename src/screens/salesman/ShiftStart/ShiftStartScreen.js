@@ -112,10 +112,13 @@ export default function ShiftStartScreen({ navigation }) {
               selectedValue={selectedSalesman}
               onValueChange={(val) => setSelectedSalesman(val)}
               style={styles.picker}
+              dropdownIconColor="#003C8F"
+              itemStyle={{ color: '#0F172A' }}
+              mode="dropdown"
             >
-              <Picker.Item label="Select Staff..." value="" color="#888" />
+              <Picker.Item label="Select Staff..." value="" color="#64748B" />
               {salesmen.map(s => (
-                <Picker.Item key={s.id} label={s.name} value={s.id} />
+                <Picker.Item key={s.id} label={s.name} value={s.id} color="#0F172A" />
               ))}
             </Picker>
           </View>
@@ -126,10 +129,13 @@ export default function ShiftStartScreen({ navigation }) {
               selectedValue={selectedNozzle}
               onValueChange={handleNozzleChange}
               style={styles.picker}
+              dropdownIconColor="#003C8F"
+              itemStyle={{ color: '#0F172A' }}
+              mode="dropdown"
             >
-              <Picker.Item label="Select Nozzle..." value="" color="#888" />
+              <Picker.Item label="Select Nozzle..." value="" color="#64748B" />
               {nozzles.map(n => (
-                <Picker.Item key={n.id} label={`${n.machineName} - ${n.nozzleId} (${n.fuelType || 'Fuel'})`} value={n.id} />
+                <Picker.Item key={n.id} label={`${n.machineName} - ${n.nozzleId} (${n.fuelType || 'Fuel'})`} value={n.id} color="#0F172A" />
               ))}
             </Picker>
           </View>
@@ -215,6 +221,7 @@ const styles = StyleSheet.create({
   },
   picker: {
     height: 50,
+    color: '#0F172A',
   },
   infoBox: {
     flexDirection: 'row',

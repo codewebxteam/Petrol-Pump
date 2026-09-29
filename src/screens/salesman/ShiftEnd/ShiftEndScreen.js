@@ -103,7 +103,7 @@ export default function ShiftEndScreen({ navigation }) {
   // Cash Breakdown State
   const [cashBreakdownVisible, setCashBreakdownVisible] = useState(false);
   const [breakdownData, setBreakdownData] = useState({
-    notes2000: '', notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
+    notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
     coins20: '', coins10: '', coins5: '', coins2: '', coins1: ''
   });
   const [isCashMatched, setIsCashMatched] = useState(false);
@@ -111,7 +111,6 @@ export default function ShiftEndScreen({ navigation }) {
 
   const calculateBreakdownTotal = (data = breakdownData) => {
     let total = 0;
-    total += (parseInt(data.notes2000) || 0) * 2000;
     total += (parseInt(data.notes500) || 0) * 500;
     total += (parseInt(data.notes200) || 0) * 200;
     total += (parseInt(data.notes100) || 0) * 100;
@@ -342,10 +341,13 @@ export default function ShiftEndScreen({ navigation }) {
               selectedValue={selectedSalesman}
               onValueChange={(val) => setSelectedSalesman(val)}
               style={styles.picker}
+              dropdownIconColor="#003C8F"
+              itemStyle={{ color: '#0F172A' }}
+              mode="dropdown"
             >
-              <Picker.Item label="Select Staff..." value="" color="#888" />
+              <Picker.Item label="Select Staff..." value="" color="#64748B" />
               {salesmen.map(s => (
-                <Picker.Item key={s.id} label={s.name} value={s.id} />
+                <Picker.Item key={s.id} label={s.name} value={s.id} color="#0F172A" />
               ))}
             </Picker>
           </View>
@@ -562,7 +564,6 @@ export default function ShiftEndScreen({ navigation }) {
               <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
                 <Text style={styles.breakdownSectionTitle}>Notes</Text>
                 <View style={styles.breakdownGrid}>
-                   {renderBreakdownInput('notes2000', '₹2000 Notes')}
                    {renderBreakdownInput('notes500', '₹500 Notes')}
                    {renderBreakdownInput('notes200', '₹200 Notes')}
                    {renderBreakdownInput('notes100', '₹100 Notes')}
@@ -884,6 +885,7 @@ const styles = StyleSheet.create({
   },
   picker: {
     height: 50,
+    color: '#0F172A',
   },
   
   breakdownGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },

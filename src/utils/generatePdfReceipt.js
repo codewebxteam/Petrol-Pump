@@ -40,6 +40,8 @@ export const generatePdfHtml = (data) => {
     shortageOrExcess = 0,
     udhariReturnTotal = 0,
     udhariReturnEntries = [],
+    shiftNumber = 1,
+    shiftLabel = '',
     entryDate = new Date()
   } = data;
 
@@ -244,8 +246,8 @@ export const generatePdfHtml = (data) => {
         <div class="info-value">${dateStr}</div>
       </div>
       <div class="info-item">
-        <div class="info-label">समय (Time)</div>
-        <div class="info-value">${timeStr}</div>
+        <div class="info-label">शिफ्ट (Shift)</div>
+        <div class="info-value" style="color:#003C8F;font-weight:bold;">${shiftLabel || ('Shift ' + shiftNumber)}</div>
       </div>
       <div class="info-item">
         <div class="info-label">स्टाफ (Staff)</div>

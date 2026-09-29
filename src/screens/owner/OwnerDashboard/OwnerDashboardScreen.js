@@ -774,9 +774,18 @@ export default function OwnerDashboardScreen({ navigation }) {
                   <Text style={styles.nozzleLabel}>{dNz} (Diesel):</Text>
                   <Text style={styles.meterVal}>{dMeter}</Text>
                 </View>
-                {latestSale && (
-                  <Text style={{ fontSize: 10, color: '#16A34A', fontWeight: '600', marginTop: 4 }}>
-                    🟢 Live Closing Reading • {staffName}
+                {latestSale ? (
+                  <View style={{ marginTop: 4, flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <Text style={{ fontSize: 11, color: '#16A34A', fontWeight: '800' }}>
+                      🟢 Live Meter Reading:
+                    </Text>
+                    <Text style={{ fontSize: 11, color: '#334155', fontWeight: '600', marginLeft: 4 }}>
+                      अंतिम क्लोजिंग ({latestSale.shiftLabel || ('Shift ' + (latestSale.shiftNumber || 1))}) • {staffName}
+                    </Text>
+                  </View>
+                ) : (
+                  <Text style={{ fontSize: 10, color: '#64748B', marginTop: 4 }}>
+                    ⚪ लाइव मीटर रीडिंग उपलब्ध नहीं
                   </Text>
                 )}
               </View>

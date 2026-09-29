@@ -154,6 +154,8 @@ export const submitDailyEntry = async (entryData) => {
       machineName: machineName || machineId || 'Machine',
       salesmanId: salesmanId || 'Unknown',
       salesmanName: salesmanName || 'Staff',
+      shiftNumber: Number(entryData.shiftNumber) || 1,
+      shiftLabel: entryData.shiftLabel || `Shift ${entryData.shiftNumber || 1}`,
       
       // Petrol Nozzle Details (Connected to Tank 1)
       petrolNozzleId: petrolEntry?.nozzleId || 'N1',
@@ -276,7 +278,16 @@ export const submitDailyEntry = async (entryData) => {
       await setDoc(doc(db, 'machines', machineId), {
         petrolClosingMeter: petrolEntry?.closingMeterReading,
         dieselClosingMeter: dieselEntry?.closingMeterReading,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        lastSalesmanName: salesmanName,
+        lastShift: entryData.shiftLabel || `Shift ${entryData.shiftNumber || 1}`,
+        liveMeterReading: {
+          petrol: petrolEntry?.closingMeterReading,
+          diesel: dieselEntry?.closingMeterReading,
+          updatedAt: new Date(),
+          staff: salesmanName,
+          shift: entryData.shiftLabel || `Shift ${entryData.shiftNumber || 1}`
+        }
       }, { merge: true }).catch(() => null);
 
       // Tank 1 (Petrol Tank): Deduct only net petrol sold (5L testing was returned)

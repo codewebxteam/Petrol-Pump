@@ -22,7 +22,7 @@ export default function CustomInput({ label, error, style, inputStyle, secureTex
             secureTextEntry && { paddingRight: 45 }, // Leave space for eye icon
             leftIcon && { paddingLeft: 45 } // Leave space for left icon
           ]}
-          placeholderTextColor="#888"
+          placeholderTextColor="#64748B"
           secureTextEntry={isSecure}
           {...props}
         />
@@ -34,7 +34,7 @@ export default function CustomInput({ label, error, style, inputStyle, secureTex
             <Icon 
               name={isSecure ? 'eye-off-outline' : 'eye-outline'} 
               size={22} 
-              color="#777" 
+              color="#64748B" 
             />
           </TouchableOpacity>
         )}
@@ -51,7 +51,7 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: 14,
-    color: '#555',
+    color: '#1E293B',
     marginBottom: 5,
     fontWeight: 'bold',
   },
@@ -71,9 +71,9 @@ const styles = StyleSheet.create({
     padding: 15,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#ddd',
+    borderColor: '#CBD5E1',
     fontSize: 16,
-    color: '#333',
+    color: '#0F172A',
     width: '100%',
   },
   inputError: {

@@ -145,3 +145,37 @@ export const findTodayEntry = async (salesmanId, machineId) => {
     return null;
   }
 };
+
+/**
+ * Fetches all sales reports submitted today for a specific machine.
+ * Returns an array sorted chronologically (earliest first, latest last).
+ */
+export const getTodayMachineEntries = async (machineId) => {
+  if (!machineId) return [];
+  try {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const q = query(
+      collection(db, 'sales_reports'),
+      where('machineId', '==', machineId)
+    );
+    const snapshot = await getDocs(q);
+
+    const list = [];
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      const reportDate = data.timestamp?.toDate ? data.timestamp.toDate() : (data.timestamp ? new Date(data.timestamp) : null);
+      if (reportDate && reportDate >= startOfDay) {
+        list.push({ id: docSnap.id, ...data, parsedDate: reportDate });
+      }
+    });
+
+    list.sort((a, b) => a.parsedDate - b.parsedDate);
+    return list;
+  } catch (error) {
+    console.warn('Error getting today machine entries:', error.message);
+    return [];
+  }
+};
+

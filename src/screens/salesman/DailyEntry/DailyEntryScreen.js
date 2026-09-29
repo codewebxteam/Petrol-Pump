@@ -18,7 +18,7 @@ import {
   getMonthKey
 } from '../../../services/dbServices';
 import { generateAndSharePdf } from '../../../utils/generatePdfReceipt';
-import { createEditRequest, verifyEditOtp, findTodayEntry } from '../../../utils/otpHelper';
+import { createEditRequest, verifyEditOtp, findTodayEntry, getTodayMachineEntries } from '../../../utils/otpHelper';
 import CustomInput from '../../../components/CustomInput';
 import CustomButton from '../../../components/CustomButton';
 import Icon from '@expo/vector-icons/Ionicons';
@@ -70,6 +70,10 @@ export default function DailyEntryScreen({ navigation }) {
   // Dynamic Nozzle IDs based on Machine (e.g. DU1 -> N1/N2, DU2 -> N3/N4)
   const [currentPetrolNozzleId, setCurrentPetrolNozzleId] = useState('N1');
   const [currentDieselNozzleId, setCurrentDieselNozzleId] = useState('N2');
+
+  // Shift Management State (Shift 1, Shift 2, etc. on same machine)
+  const [shiftNumber, setShiftNumber] = useState(1);
+  const [todayMachineEntries, setTodayMachineEntries] = useState([]);
 
   // Testing already done today status (hides testing input if already submitted today)
   const [petrolTestingAlreadyDone, setPetrolTestingAlreadyDone] = useState(false);
@@ -148,7 +152,7 @@ export default function DailyEntryScreen({ navigation }) {
   // 2. Cash Breakdown
   const [cashBreakdownVisible, setCashBreakdownVisible] = useState(false);
   const [breakdownData, setBreakdownData] = useState({
-    notes2000: '', notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
+    notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
     coins20: '', coins10: '', coins5: '', coins2: '', coins1: ''
   });
   const [isCashMatched, setIsCashMatched] = useState(false);
@@ -156,7 +160,6 @@ export default function DailyEntryScreen({ navigation }) {
 
   const calculateBreakdownTotal = (data = breakdownData) => {
     let total = 0;
-    total += (parseInt(data.notes2000) || 0) * 2000;
     total += (parseInt(data.notes500) || 0) * 500;
     total += (parseInt(data.notes200) || 0) * 200;
     total += (parseInt(data.notes100) || 0) * 100;
@@ -173,7 +176,6 @@ export default function DailyEntryScreen({ navigation }) {
 
   const calculateNotesTotal = (data = breakdownData) => {
     let total = 0;
-    total += (parseInt(data.notes2000) || 0) * 2000;
     total += (parseInt(data.notes500) || 0) * 500;
     total += (parseInt(data.notes200) || 0) * 200;
     total += (parseInt(data.notes100) || 0) * 100;
@@ -536,7 +538,7 @@ export default function DailyEntryScreen({ navigation }) {
     setIsUdhariMatched(false);
     setIsExpenseMatched(false);
     setBreakdownData({
-      notes2000: '', notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
+      notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
       coins20: '', coins10: '', coins5: '', coins2: '', coins1: ''
     });
     setDigitalEntries([
@@ -602,6 +604,69 @@ export default function DailyEntryScreen({ navigation }) {
     setIsFormClearedForFreshFill(false);
   };
 
+  // Switch to editing previous shift if staff wants to modify past report
+  const handleEditPreviousShift = () => {
+    if (todayMachineEntries && todayMachineEntries.length > 0) {
+      const lastEntry = todayMachineEntries[todayMachineEntries.length - 1];
+      setExistingReportId(lastEntry.id);
+      setExistingReportData(lastEntry);
+      setIsEditMode(true);
+      setShiftNumber(lastEntry.shiftNumber || todayMachineEntries.length);
+
+      if (lastEntry.petrolOpeningMeter) setPetrolOpeningMeter(String(lastEntry.petrolOpeningMeter));
+      if (lastEntry.petrolClosingMeter) setPetrolClosingMeter(String(lastEntry.petrolClosingMeter));
+      if (lastEntry.dieselOpeningMeter) setDieselOpeningMeter(String(lastEntry.dieselOpeningMeter));
+      if (lastEntry.dieselClosingMeter) setDieselClosingMeter(String(lastEntry.dieselClosingMeter));
+
+      setPetrolTestingQty(String(lastEntry.petrolTesting ?? '0'));
+      setDieselTestingQty(String(lastEntry.dieselTesting ?? '0'));
+      if (lastEntry.petrolRate) setPetrolRate(String(lastEntry.petrolRate));
+      if (lastEntry.dieselRate) setDieselRate(String(lastEntry.dieselRate));
+
+      if (lastEntry.cashNotesAmount !== undefined) {
+        setCash(String(lastEntry.cashNotesAmount));
+      } else if (lastEntry.cashAmount) {
+        setCash(String(lastEntry.cashAmount));
+      }
+      if (lastEntry.coinsAmount !== undefined) {
+        setCoins(String(lastEntry.coinsAmount));
+      } else {
+        setCoins('');
+      }
+      setOnline(lastEntry.onlineAmount ? String(lastEntry.onlineAmount) : '');
+      setUdhari(lastEntry.udhariAmount ? String(lastEntry.udhariAmount) : '');
+      setExpense(lastEntry.expenses ? String(lastEntry.expenses) : '');
+
+      if (lastEntry.digitalPaymentsBreakdown && lastEntry.digitalPaymentsBreakdown.length > 0) {
+        setDigitalEntries(lastEntry.digitalPaymentsBreakdown);
+      }
+      if (lastEntry.cashBreakdown) {
+        setBreakdownData(lastEntry.cashBreakdown);
+        setIsCashMatched(true);
+      }
+      if (lastEntry.udhariBreakdown && lastEntry.udhariBreakdown.length > 0) {
+        setUdhariBreakdownData(lastEntry.udhariBreakdown);
+        setIsUdhariMatched(true);
+      }
+      if (lastEntry.expenseBreakdown && lastEntry.expenseBreakdown.length > 0) {
+        setExpenseBreakdownData(lastEntry.expenseBreakdown);
+        setIsExpenseMatched(true);
+      }
+      setIsFormClearedForFreshFill(false);
+
+      Alert.alert(
+        'पिछली शिफ्ट लोड हुई (Edit Mode)',
+        `शिफ्ट ${lastEntry.shiftNumber || todayMachineEntries.length} का डेटा लोड कर दिया गया है। बदलाव करके सबमिट करने पर Admin OTP लगेगा।`
+      );
+    }
+  };
+
+  const handleSwitchToNewShift = () => {
+    if (selectedMachine) {
+      handleMachineChange(selectedMachine);
+    }
+  };
+
   // When Machine Changes: Auto-Carry Last Closing Meters!
   const handleMachineChange = async (machineId) => {
     setSelectedMachine(machineId);
@@ -648,77 +713,89 @@ export default function DailyEntryScreen({ navigation }) {
     setCurrentDieselNozzleId(activeDNozzleId);
 
     try {
-      const cachedPetrol = (await AsyncStorage.getItem(`@meter_${machineId}_petrol`)) || (await AsyncStorage.getItem(`@meter_${activePNozzleId}`));
-      const cachedDiesel = (await AsyncStorage.getItem(`@meter_${machineId}_diesel`)) || (await AsyncStorage.getItem(`@meter_${activeDNozzleId}`));
+      // 1. Fetch all today's entries for this machine to determine Shift Number & Last Closing
+      const entriesToday = await getTodayMachineEntries(machineId);
+      setTodayMachineEntries(entriesToday);
+      const computedShift = entriesToday.length + 1;
+      setShiftNumber(computedShift);
 
-      if (cachedPetrol) {
-        setPetrolOpeningMeter(formatTo4Decimals(cachedPetrol));
-        setPetrolAutoLoaded(true);
-      } else if (pNozzle.currentMeterReading !== undefined && pNozzle.currentMeterReading !== null) {
-        setPetrolOpeningMeter(formatTo4Decimals(pNozzle.currentMeterReading));
-        setPetrolAutoLoaded(true);
-      } else {
-        setPetrolOpeningMeter('1933.9489');
-        setPetrolAutoLoaded(false);
-      }
-
-      if (cachedDiesel) {
-        setDieselOpeningMeter(formatTo4Decimals(cachedDiesel));
-        setDieselAutoLoaded(true);
-      } else if (dNozzle.currentMeterReading !== undefined && dNozzle.currentMeterReading !== null) {
-        setDieselOpeningMeter(formatTo4Decimals(dNozzle.currentMeterReading));
-        setDieselAutoLoaded(true);
-      } else {
-        setDieselOpeningMeter('2450.1234');
-        setDieselAutoLoaded(false);
-      }
-
-      setPetrolRate('');
-      setDieselRate('');
-
-      setPetrolClosingMeter('');
-      setDieselClosingMeter('');
-
-      // Check if testing was already performed today on this machine
-      const todayKey = new Date().toISOString().split('T')[0];
-      let pTestingDone = false;
-      let dTestingDone = false;
-
-      try {
-        const cachedTesting = await AsyncStorage.getItem(`@testing_done_${machineId}_${todayKey}`);
-        if (cachedTesting === 'true') {
-          pTestingDone = true;
-          dTestingDone = true;
+      if (entriesToday.length > 0) {
+        // Shift 2 or subsequent shift:
+        // Automatically take the latest submitted entry's closing meter as opening meter!
+        const lastEntry = entriesToday[entriesToday.length - 1];
+        if (lastEntry.petrolClosingMeter) {
+          setPetrolOpeningMeter(formatTo4Decimals(lastEntry.petrolClosingMeter));
+          setPetrolAutoLoaded(true);
         } else {
-          // Check Firestore reports from today for this machine
-          const startOfDay = new Date();
-          startOfDay.setHours(0, 0, 0, 0);
-          const qReports = query(
-            collection(db, 'sales_reports'),
-            where('machineId', '==', machineId)
-          );
-          const querySnapshot = await getDocs(qReports);
-          querySnapshot.forEach(docSnap => {
-            const rep = docSnap.data();
-            const repDate = rep.timestamp?.toDate ? rep.timestamp.toDate() : (rep.timestamp ? new Date(rep.timestamp) : null);
-            if (repDate && repDate >= startOfDay) {
-              if (Number(rep.petrolTesting) > 0) pTestingDone = true;
-              if (Number(rep.dieselTesting) > 0) dTestingDone = true;
-            }
-          });
+          setPetrolOpeningMeter('1933.9489');
+          setPetrolAutoLoaded(false);
         }
-      } catch (checkErr) {
-        console.warn("Testing check error:", checkErr);
-      }
 
-      setPetrolTestingAlreadyDone(pTestingDone);
-      setDieselTestingAlreadyDone(dTestingDone);
-      setPetrolTestingQty(pTestingDone ? '0' : '5');
-      setDieselTestingQty(dTestingDone ? '0' : '5');
+        if (lastEntry.dieselClosingMeter) {
+          setDieselOpeningMeter(formatTo4Decimals(lastEntry.dieselClosingMeter));
+          setDieselAutoLoaded(true);
+        } else {
+          setDieselOpeningMeter('2450.1234');
+          setDieselAutoLoaded(false);
+        }
 
-      // Check for existing entry today (Edit Mode Detection)
-      if (selectedSalesman) {
-        await checkEditModeForStaffAndMachine(selectedSalesman, machineId);
+        // In Shift 2+, testing is NOT applicable (testing is done only in morning Shift 1)
+        setPetrolTestingAlreadyDone(true);
+        setDieselTestingAlreadyDone(true);
+        setPetrolTestingQty('0');
+        setDieselTestingQty('0');
+
+        // Preload fuel rates from previous shift
+        if (lastEntry.petrolRate) setPetrolRate(String(lastEntry.petrolRate));
+        if (lastEntry.dieselRate) setDieselRate(String(lastEntry.dieselRate));
+
+        setPetrolClosingMeter('');
+        setDieselClosingMeter('');
+
+        // Ensure not in edit mode (it's a fresh Shift 2)
+        setIsEditMode(false);
+        setExistingReportId(null);
+        setExistingReportData(null);
+      } else {
+        // Shift 1 (first shift of the day):
+        const cachedPetrol = (await AsyncStorage.getItem(`@meter_${machineId}_petrol`)) || (await AsyncStorage.getItem(`@meter_${activePNozzleId}`));
+        const cachedDiesel = (await AsyncStorage.getItem(`@meter_${machineId}_diesel`)) || (await AsyncStorage.getItem(`@meter_${activeDNozzleId}`));
+
+        if (cachedPetrol) {
+          setPetrolOpeningMeter(formatTo4Decimals(cachedPetrol));
+          setPetrolAutoLoaded(true);
+        } else if (pNozzle.currentMeterReading !== undefined && pNozzle.currentMeterReading !== null) {
+          setPetrolOpeningMeter(formatTo4Decimals(pNozzle.currentMeterReading));
+          setPetrolAutoLoaded(true);
+        } else {
+          setPetrolOpeningMeter('1933.9489');
+          setPetrolAutoLoaded(false);
+        }
+
+        if (cachedDiesel) {
+          setDieselOpeningMeter(formatTo4Decimals(cachedDiesel));
+          setDieselAutoLoaded(true);
+        } else if (dNozzle.currentMeterReading !== undefined && dNozzle.currentMeterReading !== null) {
+          setDieselOpeningMeter(formatTo4Decimals(dNozzle.currentMeterReading));
+          setDieselAutoLoaded(true);
+        } else {
+          setDieselOpeningMeter('2450.1234');
+          setDieselAutoLoaded(false);
+        }
+
+        setPetrolRate('');
+        setDieselRate('');
+        setPetrolClosingMeter('');
+        setDieselClosingMeter('');
+
+        setPetrolTestingAlreadyDone(false);
+        setDieselTestingAlreadyDone(false);
+        setPetrolTestingQty('5');
+        setDieselTestingQty('5');
+
+        setIsEditMode(false);
+        setExistingReportId(null);
+        setExistingReportData(null);
       }
     } catch (e) {
       console.warn("Auto-carry reading error:", e);
@@ -745,7 +822,9 @@ export default function DailyEntryScreen({ navigation }) {
 
   // Combined Machine Totals
   const totalLitersSold = pNetSold + dNetSold;
-  const totalExpectedAmount = pExpected + dExpected;
+  const totalFuelAmount = pExpected + dExpected;
+  const udhariReturnTotal = calculateReturnTotal();
+  const totalExpectedAmount = totalFuelAmount + udhariReturnTotal;
 
   // Combined Collections
   const cashNotesAmt = parseFloat(cash) || 0;
@@ -981,12 +1060,16 @@ export default function DailyEntryScreen({ navigation }) {
       expenseBreakdown: expenseAmt > 0 ? expenseBreakdownData : null,
       totalPayment: totalCollection,
       shortageOrExcess,
+      shiftNumber: Number(shiftNumber) || 1,
+      shiftLabel: `Shift ${Number(shiftNumber) || 1}`,
       entryDate: new Date()
     };
 
     const pdfPayload = {
       staffName,
       machineName,
+      shiftNumber: Number(shiftNumber) || 1,
+      shiftLabel: `Shift ${Number(shiftNumber) || 1}`,
       petrolNozzleId: currentPetrolNozzleId,
       dieselNozzleId: currentDieselNozzleId,
       petrolOpening: petrolOpeningMeter.trim(),
@@ -1027,8 +1110,14 @@ export default function DailyEntryScreen({ navigation }) {
     setDieselOpeningMeter(closingD || dieselClosingMeter.trim());
     setPetrolClosingMeter('');
     setDieselClosingMeter('');
-    setPetrolTestingQty('5');
-    setDieselTestingQty('5');
+    
+    // Advance to next shift!
+    setShiftNumber(prev => prev + 1);
+    setPetrolTestingQty('0');
+    setDieselTestingQty('0');
+    setPetrolTestingAlreadyDone(true);
+    setDieselTestingAlreadyDone(true);
+
     setPetrolRate('');
     setDieselRate('');
     setPetrolAutoLoaded(true);
@@ -1048,7 +1137,7 @@ export default function DailyEntryScreen({ navigation }) {
     setIsUdhariMatched(false);
     setIsExpenseMatched(false);
     setBreakdownData({
-      notes2000: '', notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
+      notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
       coins20: '', coins10: '', coins5: '', coins2: '', coins1: ''
     });
     setDigitalEntries([
@@ -1131,35 +1220,19 @@ export default function DailyEntryScreen({ navigation }) {
       }
     }
 
-    // Safety check: Is there ALREADY an entry submitted today for this machine or staff?
-    // Whether in edit mode, or if user chose "शुरू से भरें", or re-entered after submit:
-    let targetReportId = existingReportId;
-    if (!targetReportId && selectedSalesman && selectedMachine) {
-      try {
-        const found = await findTodayEntry(selectedSalesman, selectedMachine);
-        if (found) {
-          targetReportId = found.id;
-          setExistingReportId(found.id);
-        }
-      } catch (err) {
-        console.warn('Check today entry in handleSubmit failed:', err);
-      }
-    }
-
-    // If an entry already exists for today -> Admin OTP is strictly required!
-    if (targetReportId || isEditMode) {
+    // Admin OTP is strictly required ONLY when explicitly editing an existing submitted report!
+    // New shifts (Shift 2, Shift 3, etc.) submit directly without OTP.
+    if (isEditMode && existingReportId) {
       setSubmitting(true);
       try {
         const { staffName, machineName } = buildCurrentData();
-        const req = await createEditRequest(staffName, selectedSalesman, selectedMachine, machineName, targetReportId || existingReportId);
+        const req = await createEditRequest(staffName, selectedSalesman, selectedMachine, machineName, existingReportId);
         setEditRequestId(req.requestId);
-        setExistingReportId(targetReportId || existingReportId);
-        setIsEditMode(true);
         setOtpInput('');
         setOtpModalVisible(true);
         Alert.alert(
           '🔐 Admin OTP आवश्यक है',
-          'इस मशीन पर आज का हिसाब पहले से दर्ज हो चुका है। डेटा को फिर से सबमिट करने या नया हिसाब दर्ज करने के लिए Admin Dashboard से 6-digit OTP लेना अनिवार्य है।'
+          'दर्ज हो चुके हिसाब में बदलाव करने के लिए Admin Dashboard से 6-digit OTP लेना अनिवार्य है।'
         );
       } catch (err) {
         console.error('Create edit request error:', err);
@@ -1337,7 +1410,7 @@ export default function DailyEntryScreen({ navigation }) {
               <Icon name="hardware-chip" size={26} color="#fff" />
             </View>
             <View style={{flex: 1, marginLeft: 12}}>
-              <Text style={styles.title}>शाम की दैनिक बिक्री एंट्री</Text>
+              <Text style={styles.title}>दैनिक बिक्री एंट्री</Text>
               <Text style={styles.subtitle}>1 Staff • 1 Machine (Petrol Tank 1 & Diesel Tank 2)</Text>
             </View>
           </View>
@@ -1350,18 +1423,26 @@ export default function DailyEntryScreen({ navigation }) {
                 selectedValue={selectedSalesman}
                 onValueChange={(val) => {
                   setSelectedSalesman(val);
-                  if (val && selectedMachine) {
-                    checkEditModeForStaffAndMachine(val, selectedMachine);
-                  }
                 }}
                 style={styles.picker}
+                dropdownIconColor="#003C8F"
+                itemStyle={{ color: '#0F172A', fontSize: 15 }}
+                mode="dropdown"
               >
-                <Picker.Item label="-- स्टाफ का नाम चुनें --" value="" color="#888" />
+                <Picker.Item label="-- स्टाफ का नाम चुनें --" value="" color="#64748B" />
                 {effectiveSalesmen.map(s => (
-                  <Picker.Item key={s.id} label={`👤 ${s.name}`} value={s.id} />
+                  <Picker.Item key={s.id} label={`👤 ${s.name}`} value={s.id} color="#0F172A" />
                 ))}
               </Picker>
             </View>
+            {selectedSalesman ? (
+              <View style={styles.selectedIndicatorBadge}>
+                <Icon name="checkmark-circle" size={14} color="#16A34A" />
+                <Text style={styles.selectedIndicatorText}>
+                  चयनित स्टाफ: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveSalesmen.find(s => s.id === selectedSalesman)?.name || 'Staff'}</Text>
+                </Text>
+              </View>
+            ) : null}
 
             <Text style={[styles.label, { marginTop: 12 }]}>2. अपनी मशीन चुनें (Select Machine) *</Text>
             <View style={styles.pickerContainer}>
@@ -1369,8 +1450,11 @@ export default function DailyEntryScreen({ navigation }) {
                 selectedValue={selectedMachine}
                 onValueChange={handleMachineChange}
                 style={styles.picker}
+                dropdownIconColor="#003C8F"
+                itemStyle={{ color: '#0F172A', fontSize: 15 }}
+                mode="dropdown"
               >
-                <Picker.Item label="-- डिस्पेंसर मशीन चुनें --" value="" color="#888" />
+                <Picker.Item label="-- डिस्पेंसर मशीन चुनें --" value="" color="#64748B" />
                 {effectiveMachines.map(m => {
                   const match = String(m.name || m.id || '').match(/\d+/);
                   const num = match ? parseInt(match[0], 10) : 1;
@@ -1382,12 +1466,84 @@ export default function DailyEntryScreen({ navigation }) {
                       key={m.id} 
                       label={`⛽ ${displayName} (${pNz} Petrol • ${dNz} Diesel)`} 
                       value={m.id} 
+                      color="#0F172A"
                     />
                   );
                 })}
               </Picker>
             </View>
+            {selectedMachine ? (
+              <View style={styles.selectedIndicatorBadge}>
+                <Icon name="checkmark-circle" size={14} color="#16A34A" />
+                <Text style={styles.selectedIndicatorText}>
+                  चयनित मशीन: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveMachines.find(m => m.id === selectedMachine)?.name || selectedMachine}</Text>
+                </Text>
+              </View>
+            ) : null}
           </View>
+
+          {/* Shift Indicator Card */}
+          {selectedMachine !== '' && (
+            <View style={[styles.shiftCard, shiftNumber > 1 ? styles.shiftCardShift2 : styles.shiftCardShift1]}>
+              <View style={styles.shiftCardTop}>
+                <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                  <View style={[styles.shiftPill, shiftNumber > 1 ? styles.shiftPillShift2 : styles.shiftPillShift1]}>
+                    <Icon name={shiftNumber > 1 ? "moon" : "sunny"} size={14} color={shiftNumber > 1 ? "#7C3AED" : "#D97706"} />
+                    <Text style={[styles.shiftPillText, shiftNumber > 1 ? styles.shiftPillTextShift2 : styles.shiftPillTextShift1]}>
+                      शिफ्ट {shiftNumber} (Shift {shiftNumber})
+                    </Text>
+                  </View>
+                  <Text style={styles.shiftCardMachineName}>
+                    {effectiveMachines.find(m => m.id === selectedMachine)?.name || selectedMachine}
+                  </Text>
+                </View>
+                {shiftNumber > 1 && (
+                  <View style={styles.linkedBadge}>
+                    <Icon name="link" size={12} color="#0284C7" />
+                    <Text style={styles.linkedBadgeText}>मीटर लिंक्ड</Text>
+                  </View>
+                )}
+              </View>
+
+              {shiftNumber > 1 ? (
+                <View style={{ marginTop: 8 }}>
+                  <Text style={styles.shiftInfoText}>
+                    ⚡ इस मशीन पर पूर्व शिफ्ट का हिसाब पूर्ण हो चुका है। ओपनिंग मीटर पिछली शिफ्ट के क्लोजिंग मीटर से स्वतः लोड हो गया है।
+                  </Text>
+                  <View style={styles.shiftNoTestingBadge}>
+                    <Icon name="checkmark-circle" size={14} color="#047857" />
+                    <Text style={styles.shiftNoTestingText}>
+                      शिफ्ट {shiftNumber} में जांच तेल (Testing Fuel) का विकल्प बंद है (0 L).
+                    </Text>
+                  </View>
+                  
+                  {!isEditMode && todayMachineEntries.length > 0 && (
+                    <TouchableOpacity style={styles.shiftActionBtn} onPress={handleEditPreviousShift}>
+                      <Icon name="create-outline" size={14} color="#003C8F" />
+                      <Text style={styles.shiftActionBtnText}>
+                        यदि पिछली शिफ्ट (शिफ्ट {todayMachineEntries.length}) सुधारनी है, तो यहाँ दबाएँ
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ) : (
+                <View style={{ marginTop: 6 }}>
+                  <Text style={styles.shiftInfoText}>
+                    ☀️ आज की पहली शिफ्ट। ओपनिंग मीटर और जांच तेल (Testing Fuel) दर्ज करें।
+                  </Text>
+                </View>
+              )}
+
+              {isEditMode && (
+                <TouchableOpacity style={[styles.shiftActionBtn, { borderColor: '#16A34A', backgroundColor: '#F0FDF4', marginTop: 8 }]} onPress={handleSwitchToNewShift}>
+                  <Icon name="add-circle-outline" size={14} color="#16A34A" />
+                  <Text style={[styles.shiftActionBtnText, { color: '#15803D', fontWeight: 'bold' }]}>
+                    ➕ नई शिफ्ट {todayMachineEntries.length + 1} का फॉर्म भरें (New Shift)
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
 
           {/* Edit Mode Notice Banner */}
           {isEditMode && (
@@ -1470,9 +1626,23 @@ export default function DailyEntryScreen({ navigation }) {
                   <Text style={styles.receiptMainValue}>{totalLitersSold.toFixed(4)} L</Text>
                 </View>
 
+                {/* Fuel Amount Subtotal */}
+                <View style={styles.receiptRow}>
+                  <Text style={styles.receiptMainLabel}>ईंधन बिक्री राशि (Fuel Sales):</Text>
+                  <Text style={styles.receiptMainValue}>₹{totalFuelAmount.toFixed(2)}</Text>
+                </View>
+
+                {/* Udhari Return Inflow (if any) */}
+                {udhariReturnTotal > 0 && (
+                  <View style={styles.receiptRow}>
+                    <Text style={[styles.receiptMainLabel, { color: '#15803D' }]}>+ उधारी वापसी प्राप्त (Udhari Received):</Text>
+                    <Text style={[styles.receiptMainValue, { color: '#15803D', fontWeight: 'bold' }]}>+₹{udhariReturnTotal.toFixed(2)}</Text>
+                  </View>
+                )}
+
                 {/* Total Expected Amount */}
                 <View style={styles.receiptRow}>
-                  <Text style={styles.receiptMainLabel}>अपेक्षित कुल राशि (Expected Total):</Text>
+                  <Text style={styles.receiptMainLabel}>अपेक्षित कुल जमा (Expected Total):</Text>
                   <Text style={[styles.receiptMainValue, { color: '#003C8F', fontSize: 18 }]}>₹{totalExpectedAmount.toFixed(2)}</Text>
                 </View>
 
@@ -1507,47 +1677,60 @@ export default function DailyEntryScreen({ navigation }) {
                   value={petrolOpeningMeter} 
                   onChangeText={(t) => setPetrolOpeningMeter(sanitizeDecimalInput(t))} 
                   leftIcon="speedometer-outline" 
-                  placeholder="1933.9489"
+                  placeholder="0.00"
                 />
 
                 {/* Petrol Closing Meter */}
                 <View style={{ marginTop: 10 }}>
                   <CustomInput 
-                    label="शाम का पेट्रोल क्लोजिंग मीटर (Closing Meter) *" 
+                    label="पेट्रोल क्लोजिंग मीटर (Closing Meter) *" 
                     keyboardType="numeric" 
                     value={petrolClosingMeter} 
                     onChangeText={(t) => setPetrolClosingMeter(sanitizeDecimalInput(t))} 
                     leftIcon="keypad-outline" 
-                    placeholder="1955.0000"
+                    placeholder="0.00"
                   />
                 </View>
 
-                {/* Testing Liters & Rate (Always open and editable) */}
-                <View style={styles.twoColumnRow}>
-                  <View style={{ flex: 1, marginRight: 8 }}>
-                    <CustomInput 
-                      label="जांच तेल (Testing L)" 
-                      keyboardType="numeric" 
-                      value={petrolTestingQty} 
-                      onChangeText={(t) => setPetrolTestingQty(sanitizeDecimalInput(t))} 
-                      leftIcon="flask-outline" 
-                      placeholder="उदा. 5 या 10"
-                    />
+                {/* Testing Liters & Rate (Shift 1: Testing + Rate | Shift 2+: Rate Only) */}
+                {shiftNumber === 1 ? (
+                  <View style={styles.twoColumnRow}>
+                    <View style={{ flex: 1, marginRight: 8 }}>
+                      <CustomInput 
+                        label="जांच तेल (Testing L)" 
+                        keyboardType="numeric" 
+                        value={petrolTestingQty} 
+                        onChangeText={(t) => setPetrolTestingQty(sanitizeDecimalInput(t))} 
+                        leftIcon="flask-outline" 
+                        placeholder="5"
+                      />
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 8 }}>
+                      <CustomInput 
+                        label="पेट्रोल रेट (₹/L) *" 
+                        keyboardType="numeric" 
+                        value={petrolRate} 
+                        onChangeText={(t) => setPetrolRate(sanitizeDecimalInput(t))} 
+                        leftIcon="pricetag-outline" 
+                        placeholder="0.00"
+                      />
+                    </View>
                   </View>
-                  <View style={{ flex: 1, marginLeft: 8 }}>
+                ) : (
+                  <View style={{ marginTop: 10 }}>
                     <CustomInput 
                       label="पेट्रोल रेट (₹/L) *" 
                       keyboardType="numeric" 
                       value={petrolRate} 
                       onChangeText={(t) => setPetrolRate(sanitizeDecimalInput(t))} 
                       leftIcon="pricetag-outline" 
-                      placeholder="उदा. 96.72"
+                      placeholder="0.00"
                     />
                   </View>
-                </View>
+                )}
 
-                {/* Information badge if testing was already recorded today */}
-                {petrolTestingAlreadyDone && (
+                {/* Information badge if testing was already recorded today (Shift 1 only) */}
+                {shiftNumber === 1 && petrolTestingAlreadyDone && (
                   <View style={styles.testingDoneNotice}>
                     <Icon name="information-circle-outline" size={16} color="#0284C7" />
                     <Text style={[styles.testingDoneText, { color: '#0369A1' }]}>
@@ -1557,12 +1740,14 @@ export default function DailyEntryScreen({ navigation }) {
                 )}
 
                 {/* Return to Tank Notice */}
-                <View style={styles.tankReturnNotice}>
-                  <Icon name="arrow-undo-circle" size={16} color="#0369A1" />
-                  <Text style={styles.tankReturnText}>
-                    {pTesting > 0 ? `${pTesting} L टेस्टिंग का तेल वापस Tank 1 (पेट्रोल) में जुड़ जाएगा.` : 'कोई टेस्टिंग तेल नहीं (0 L).'}
-                  </Text>
-                </View>
+                {shiftNumber === 1 && pTesting > 0 && (
+                  <View style={styles.tankReturnNotice}>
+                    <Icon name="arrow-undo-circle" size={16} color="#0369A1" />
+                    <Text style={styles.tankReturnText}>
+                      {`${pTesting} L टेस्टिंग का तेल वापस Tank 1 (पेट्रोल) में जुड़ जाएगा.`}
+                    </Text>
+                  </View>
+                )}
 
                 {/* Petrol Sold Preview */}
                 <View style={styles.previewBox}>
@@ -1588,47 +1773,60 @@ export default function DailyEntryScreen({ navigation }) {
                   value={dieselOpeningMeter} 
                   onChangeText={(t) => setDieselOpeningMeter(sanitizeDecimalInput(t))} 
                   leftIcon="speedometer-outline" 
-                  placeholder="2450.1234"
+                  placeholder="0.00"
                 />
 
                 {/* Diesel Closing Meter */}
                 <View style={{ marginTop: 10 }}>
                   <CustomInput 
-                    label="शाम का डीजल क्लोजिंग मीटर (Closing Meter) *" 
+                    label="डीजल क्लोजिंग मीटर (Closing Meter) *" 
                     keyboardType="numeric" 
                     value={dieselClosingMeter} 
                     onChangeText={(t) => setDieselClosingMeter(sanitizeDecimalInput(t))} 
                     leftIcon="keypad-outline" 
-                    placeholder="2510.0000"
+                    placeholder="0.00"
                   />
                 </View>
 
-                {/* Testing Liters & Rate (Always open and editable) */}
-                <View style={styles.twoColumnRow}>
-                  <View style={{ flex: 1, marginRight: 8 }}>
-                    <CustomInput 
-                      label="जांच तेल (Testing L)" 
-                      keyboardType="numeric" 
-                      value={dieselTestingQty} 
-                      onChangeText={(t) => setDieselTestingQty(sanitizeDecimalInput(t))} 
-                      leftIcon="flask-outline" 
-                      placeholder="उदा. 5 या 10"
-                    />
+                {/* Testing Liters & Rate (Shift 1: Testing + Rate | Shift 2+: Rate Only) */}
+                {shiftNumber === 1 ? (
+                  <View style={styles.twoColumnRow}>
+                    <View style={{ flex: 1, marginRight: 8 }}>
+                      <CustomInput 
+                        label="जांच तेल (Testing L)" 
+                        keyboardType="numeric" 
+                        value={dieselTestingQty} 
+                        onChangeText={(t) => setDieselTestingQty(sanitizeDecimalInput(t))} 
+                        leftIcon="flask-outline" 
+                        placeholder="5"
+                      />
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 8 }}>
+                      <CustomInput 
+                        label="डीजल रेट (₹/L) *" 
+                        keyboardType="numeric" 
+                        value={dieselRate} 
+                        onChangeText={(t) => setDieselRate(sanitizeDecimalInput(t))} 
+                        leftIcon="pricetag-outline" 
+                        placeholder="0.00"
+                      />
+                    </View>
                   </View>
-                  <View style={{ flex: 1, marginLeft: 8 }}>
+                ) : (
+                  <View style={{ marginTop: 10 }}>
                     <CustomInput 
                       label="डीजल रेट (₹/L) *" 
                       keyboardType="numeric" 
                       value={dieselRate} 
                       onChangeText={(t) => setDieselRate(sanitizeDecimalInput(t))} 
                       leftIcon="pricetag-outline" 
-                      placeholder="उदा. 89.62"
+                      placeholder="0.00"
                     />
                   </View>
-                </View>
+                )}
 
-                {/* Information badge if testing was already recorded today */}
-                {dieselTestingAlreadyDone && (
+                {/* Information badge if testing was already recorded today (Shift 1 only) */}
+                {shiftNumber === 1 && dieselTestingAlreadyDone && (
                   <View style={styles.testingDoneNotice}>
                     <Icon name="information-circle-outline" size={16} color="#0284C7" />
                     <Text style={[styles.testingDoneText, { color: '#0369A1' }]}>
@@ -1638,12 +1836,14 @@ export default function DailyEntryScreen({ navigation }) {
                 )}
 
                 {/* Return to Tank Notice */}
-                <View style={styles.tankReturnNotice}>
-                  <Icon name="arrow-undo-circle" size={16} color="#0369A1" />
-                  <Text style={styles.tankReturnText}>
-                    {dTesting > 0 ? `${dTesting} L टेस्टिंग का तेल वापस Tank 2 (डीजल) में जुड़ जाएगा.` : 'कोई टेस्टिंग तेल नहीं (0 L).'}
-                  </Text>
-                </View>
+                {shiftNumber === 1 && dTesting > 0 && (
+                  <View style={styles.tankReturnNotice}>
+                    <Icon name="arrow-undo-circle" size={16} color="#0369A1" />
+                    <Text style={styles.tankReturnText}>
+                      {`${dTesting} L टेस्टिंग का तेल वापस Tank 2 (डीजल) में जुड़ जाएगा.`}
+                    </Text>
+                  </View>
+                )}
 
                 {/* Diesel Sold Preview */}
                 <View style={styles.previewBox}>
@@ -1663,6 +1863,14 @@ export default function DailyEntryScreen({ navigation }) {
                 {/* 1. Cash & Coins */}
                 <View style={{marginBottom: 16}}>
                   <Text style={styles.inputLabelCustom}>1. कैश संग्रह (Cash & Coins Collected ₹)</Text>
+                  {udhariReturnTotal > 0 && (
+                    <View style={{flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0FDF4', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: '#BBF7D0', marginBottom: 8}}>
+                      <Icon name="information-circle" size={14} color="#16A34A" />
+                      <Text style={{fontSize: 11, color: '#15803D', fontWeight: '700', marginLeft: 4}}>
+                        उधारी वापसी के ₹{udhariReturnTotal.toFixed(0)} आपके कुल कैश में शामिल हैं।
+                      </Text>
+                    </View>
+                  )}
                   
                   <View style={styles.cashInputsRow}>
                     <View style={{flex: 1.15}}>
@@ -1803,8 +2011,11 @@ export default function DailyEntryScreen({ navigation }) {
                             selectedValue={selectedReturnCustomer}
                             onValueChange={handleSelectReturnCustomer}
                             style={styles.picker}
+                            dropdownIconColor="#16A34A"
+                            itemStyle={{ color: '#0F172A', fontSize: 14 }}
+                            mode="dropdown"
                           >
-                            <Picker.Item label="-- ग्राहक चुनें --" value="" color="#888" />
+                            <Picker.Item label="-- ग्राहक चुनें --" value="" color="#64748B" />
                             {pendingUdhariCustomers
                               .filter(c => !udhariReturnEntries.find(e => e.docId === c.docId))
                               .map(c => (
@@ -1812,6 +2023,7 @@ export default function DailyEntryScreen({ navigation }) {
                                   key={c.docId} 
                                   label={`${c.customerName} — बकाया: ₹${c.remainingAmount.toFixed(0)}`} 
                                   value={c.docId} 
+                                  color="#0F172A"
                                 />
                               ))
                             }
@@ -1840,7 +2052,7 @@ export default function DailyEntryScreen({ navigation }) {
                               </View>
                               <View style={styles.returnAmountRow}>
                                 <CustomInput 
-                                  placeholder="वापसी राशि (₹)" 
+                                  placeholder="राशि (₹)" 
                                   keyboardType="numeric" 
                                   value={entry.amountReturned} 
                                   onChangeText={(t) => handleReturnAmountChange(entry.id, t)} 
@@ -1949,7 +2161,10 @@ export default function DailyEntryScreen({ navigation }) {
 
       {/* 1. Multi-Mode Digital & Cards Modal */}
       <Modal visible={digitalModalVisible} animationType="slide" transparent={true}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView 
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+          style={styles.modalOverlay}
+        >
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <View>
@@ -1987,7 +2202,7 @@ export default function DailyEntryScreen({ navigation }) {
             {customModeInputVisible && (
               <View style={styles.customAddBox}>
                 <TextInput 
-                  placeholder="पेमेंट माध्यम का नाम (उदा. Cheque, HPCL)" 
+                  placeholder="माध्यम का नाम" 
                   value={customModeName} 
                   onChangeText={setCustomModeName} 
                   style={styles.customTextInput}
@@ -1999,7 +2214,7 @@ export default function DailyEntryScreen({ navigation }) {
             )}
 
             {/* Active Payment Inputs List */}
-            <ScrollView style={{maxHeight: 280, marginTop: 10}} keyboardShouldPersistTaps="handled">
+            <ScrollView style={{maxHeight: 280, marginTop: 10}} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 20 }}>
               {digitalEntries.map((item) => (
                 <View key={item.id} style={styles.digitalInputRow}>
                   <View style={{flex: 1.8, marginRight: 8}}>
@@ -2037,12 +2252,15 @@ export default function DailyEntryScreen({ navigation }) {
               />
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* 2. Cash Breakdown Modal */}
       <Modal visible={cashBreakdownVisible} animationType="slide" transparent={true}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView 
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+          style={styles.modalOverlay}
+        >
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>कैश नोट एवं सिक्के (Cash Denominations)</Text>
@@ -2051,8 +2269,7 @@ export default function DailyEntryScreen({ navigation }) {
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={{maxHeight: 340}}>
-              {renderBreakdownInput('notes2000', '₹2000')}
+            <ScrollView style={{maxHeight: 320}} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 20 }}>
               {renderBreakdownInput('notes500', '₹500')}
               {renderBreakdownInput('notes200', '₹200')}
               {renderBreakdownInput('notes100', '₹100')}
@@ -2079,12 +2296,15 @@ export default function DailyEntryScreen({ navigation }) {
               />
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* 3. Udhari Breakdown Modal */}
       <Modal visible={udhariBreakdownVisible} animationType="slide" transparent={true}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView 
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+          style={styles.modalOverlay}
+        >
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>ग्राहक-वार उधारी (Customer Khata)</Text>
@@ -2093,7 +2313,12 @@ export default function DailyEntryScreen({ navigation }) {
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={{maxHeight: 340}}>
+            <ScrollView 
+              style={{maxHeight: 300}} 
+              keyboardShouldPersistTaps="handled" 
+              contentContainerStyle={{ paddingBottom: 24 }}
+              showsVerticalScrollIndicator={true}
+            >
               {udhariBreakdownData.map((item) => (
                 <View key={item.id} style={styles.dynamicRow}>
                   <View style={{flex: 2, marginRight: 8}}>
@@ -2138,12 +2363,15 @@ export default function DailyEntryScreen({ navigation }) {
               />
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* 4. Expense Breakdown Modal */}
       <Modal visible={expenseBreakdownVisible} animationType="slide" transparent={true}>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView 
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
+          style={styles.modalOverlay}
+        >
           <View style={[styles.modalContent, { maxHeight: '88%' }]}>
             <View style={styles.modalHeader}>
               <View>
@@ -2155,7 +2383,12 @@ export default function DailyEntryScreen({ navigation }) {
               </TouchableOpacity>
             </View>
 
-            <ScrollView style={{ maxHeight: 380 }} showsVerticalScrollIndicator={false}>
+            <ScrollView 
+              style={{ maxHeight: 360 }} 
+              showsVerticalScrollIndicator={true}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={{ paddingBottom: 24 }}
+            >
               {expenseBreakdownData.map((item) => {
                 const itemType = item.type || 'general';
                 const targetStaffId = item.salesmanId || selectedSalesman;
@@ -2215,12 +2448,31 @@ export default function DailyEntryScreen({ navigation }) {
                               fetchMonthlyAdvanceForStaff(val);
                             }}
                             style={styles.salaryPicker}
+                            dropdownIconColor="#D97706"
+                            itemStyle={{ color: '#0F172A', fontSize: 14, fontWeight: '700' }}
+                            mode="dropdown"
                           >
+                            <Picker.Item label="-- स्टाफ चुनें --" value="" color="#64748B" />
                             {effectiveSalesmen.map((st) => (
-                              <Picker.Item key={st.id} label={st.name} value={st.id} />
+                              <Picker.Item 
+                                key={st.id} 
+                                label={`👤 ${st.name}`} 
+                                value={st.id} 
+                                color="#0F172A"
+                              />
                             ))}
                           </Picker>
                         </View>
+
+                        {/* Selected Staff Badge for 100% clarity */}
+                        {targetStaffId ? (
+                          <View style={styles.salarySelectedStaffBadge}>
+                            <Icon name="person" size={14} color="#B45309" />
+                            <Text style={styles.salarySelectedStaffText}>
+                              चयनित स्टाफ: <Text style={{ fontWeight: '800', color: '#92400E' }}>{effectiveSalesmen.find(s => s.id === targetStaffId)?.name || 'Staff'}</Text>
+                            </Text>
+                          </View>
+                        ) : null}
 
                         {/* Month Advance Status Card */}
                         <View style={styles.monthAdvanceInfoCard}>
@@ -2248,7 +2500,7 @@ export default function DailyEntryScreen({ navigation }) {
                     <View style={styles.dynamicRow}>
                       <View style={{flex: 2, marginRight: 8}}>
                         <CustomInput 
-                          placeholder={itemType === 'salary' ? "टिप्पणी (उदा. त्यौहार/इमरजेंसी एडवांस)" : "कारण (उदा. चाय, जनरेटर डीजल)"} 
+                          placeholder={itemType === 'salary' ? "टिप्पणी" : "कारण"} 
                           value={item.reason} 
                           onChangeText={(t) => handleExpenseBreakdownChange(item.id, 'reason', t)} 
                           style={{marginBottom: 0}} 
@@ -2290,7 +2542,7 @@ export default function DailyEntryScreen({ navigation }) {
               />
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       {/* 6. Admin OTP Verification Modal for Edit Mode */}
@@ -2398,13 +2650,150 @@ const styles = StyleSheet.create({
   },
   label: { fontSize: 13, fontWeight: '700', color: '#334155', marginBottom: 6 },
   pickerContainer: {
-    backgroundColor: '#F1F5F9',
+    backgroundColor: '#F8FAFC',
     borderRadius: 10,
-    borderWidth: 1,
+    borderWidth: 1.5,
     borderColor: '#CBD5E1',
     overflow: 'hidden'
   },
-  picker: { height: 50 },
+  picker: { 
+    height: 52,
+    color: '#0F172A',
+    backgroundColor: 'transparent'
+  },
+  selectedIndicatorBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    marginTop: 6
+  },
+  selectedIndicatorText: {
+    fontSize: 12,
+    color: '#15803D',
+    marginLeft: 5
+  },
+
+  // Shift Card Styles
+  shiftCard: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1.5,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2
+  },
+  shiftCardShift1: {
+    borderColor: '#FDE68A',
+    backgroundColor: '#FFFDF5'
+  },
+  shiftCardShift2: {
+    borderColor: '#DDD6FE',
+    backgroundColor: '#FAF5FF'
+  },
+  shiftCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between'
+  },
+  shiftPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    marginRight: 8
+  },
+  shiftPillShift1: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FCD34D'
+  },
+  shiftPillShift2: {
+    backgroundColor: '#EDE9FE',
+    borderWidth: 1,
+    borderColor: '#C4B5FD'
+  },
+  shiftPillText: {
+    fontSize: 13,
+    fontWeight: '800',
+    marginLeft: 5
+  },
+  shiftPillTextShift1: {
+    color: '#B45309'
+  },
+  shiftPillTextShift2: {
+    color: '#6D28D9'
+  },
+  shiftCardMachineName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1E293B'
+  },
+  linkedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#E0F2FE',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#BAE6FD'
+  },
+  linkedBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#0284C7',
+    marginLeft: 4
+  },
+  shiftInfoText: {
+    fontSize: 12,
+    color: '#475569',
+    lineHeight: 18
+  },
+  shiftNoTestingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#ECFDF5',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+    marginTop: 6
+  },
+  shiftNoTestingText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#065F46',
+    marginLeft: 6
+  },
+  shiftActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginTop: 8
+  },
+  shiftActionBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F',
+    marginLeft: 6
+  },
 
   // Receipt Card
   receiptCard: {
@@ -3160,15 +3549,33 @@ const styles = StyleSheet.create({
     marginBottom: 4
   },
   salaryPickerWrap: {
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#FFFBEB',
     borderRadius: 8,
-    borderWidth: 1,
-    borderColor: '#FCD34D',
+    borderWidth: 1.5,
+    borderColor: '#F59E0B',
     overflow: 'hidden',
     marginBottom: 6
   },
   salaryPicker: {
-    height: 44
+    height: 48,
+    color: '#0F172A',
+    backgroundColor: 'transparent'
+  },
+  salarySelectedStaffBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    marginBottom: 8
+  },
+  salarySelectedStaffText: {
+    fontSize: 12,
+    color: '#78350F',
+    marginLeft: 5
   },
   monthAdvanceInfoCard: {
     backgroundColor: '#FEF3C7',

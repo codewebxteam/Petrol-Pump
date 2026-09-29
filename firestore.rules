@@ -3,27 +3,21 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Allow read/write for petrol pump daily operations
-    // (nozzles, salesmen list, tanks, and daily sales reports)
+    // Allow read/write for petrol pump daily staff operations without requiring admin login:
+    // Daily entry, meter readings, stock, udhari, salary advances, sample labels
+    match /sales_reports/{document=**} {
+      allow read, write: if true;
+    }
+
     match /nozzles/{document=**} {
       allow read, write: if true;
     }
 
     match /machines/{document=**} {
-      allow read: if true;
-      allow write: if request.auth != null;
-    }
-
-    match /tanks/{document=**} {
       allow read, write: if true;
     }
 
-    match /users/{document=**} {
-      allow read: if true;
-      allow write: if request.auth != null;
-    }
-
-    match /sales_reports/{document=**} {
+    match /tanks/{document=**} {
       allow read, write: if true;
     }
 
@@ -43,9 +37,29 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    // All other collections require login
+    match /sample_labels/{document=**} {
+      allow read, write: if true;
+    }
+
+    match /shifts/{document=**} {
+      allow read, write: if true;
+    }
+
+    // Allow anyone to read staff/user list for dropdowns; only logged-in admin can write/modify users
+    match /users/{document=**} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+
+    // Protected Admin-only collections (bank deposits, settings, audit)
+    match /bank_deposits/{document=**} {
+      allow read, write: if request.auth != null;
+    }
+
+    // Fallback: require admin login for any other collections
     match /{document=**} {
       allow read, write: if request.auth != null;
     }
   }
 }
+
