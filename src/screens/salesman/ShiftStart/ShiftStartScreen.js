@@ -111,34 +111,72 @@ export default function ShiftStartScreen({ navigation }) {
             <Picker
               selectedValue={selectedSalesman}
               onValueChange={(val) => setSelectedSalesman(val)}
-              style={styles.picker}
+              style={[styles.picker, { color: '#0F172A', backgroundColor: '#FFFFFF' }]}
               dropdownIconColor="#003C8F"
               itemStyle={{ color: '#0F172A' }}
               mode="dropdown"
             >
-              <Picker.Item label="Select Staff..." value="" color="#64748B" />
+              <Picker.Item 
+                label="Select Staff..." 
+                value="" 
+                color="#64748B" 
+                style={{ color: '#64748B', backgroundColor: '#FFFFFF' }}
+              />
               {salesmen.map(s => (
-                <Picker.Item key={s.id} label={s.name} value={s.id} color="#0F172A" />
+                <Picker.Item 
+                  key={s.id} 
+                  label={s.name} 
+                  value={s.id} 
+                  color="#0F172A" 
+                  style={{ color: '#0F172A', backgroundColor: '#FFFFFF' }}
+                />
               ))}
             </Picker>
           </View>
+          {selectedSalesman ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0FDF4', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, marginTop: -12, marginBottom: 16, borderWidth: 1, borderColor: '#BBF7D0' }}>
+              <Icon name="checkmark-circle" size={16} color="#16A34A" />
+              <Text style={{ fontSize: 13, color: '#15803D', marginLeft: 6 }}>
+                Selected Staff: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{salesmen.find(s => s.id === selectedSalesman)?.name || 'Staff'}</Text>
+              </Text>
+            </View>
+          ) : null}
 
           <Text style={styles.label}>Select Machine / Nozzle *</Text>
           <View style={styles.pickerContainer}>
             <Picker
               selectedValue={selectedNozzle}
               onValueChange={handleNozzleChange}
-              style={styles.picker}
+              style={[styles.picker, { color: '#0F172A', backgroundColor: '#FFFFFF' }]}
               dropdownIconColor="#003C8F"
               itemStyle={{ color: '#0F172A' }}
               mode="dropdown"
             >
-              <Picker.Item label="Select Nozzle..." value="" color="#64748B" />
+              <Picker.Item 
+                label="Select Nozzle..." 
+                value="" 
+                color="#64748B" 
+                style={{ color: '#64748B', backgroundColor: '#FFFFFF' }}
+              />
               {nozzles.map(n => (
-                <Picker.Item key={n.id} label={`${n.machineName} - ${n.nozzleId} (${n.fuelType || 'Fuel'})`} value={n.id} color="#0F172A" />
+                <Picker.Item 
+                  key={n.id} 
+                  label={`${n.machineName} - ${n.nozzleId} (${n.fuelType || 'Fuel'})`} 
+                  value={n.id} 
+                  color="#0F172A" 
+                  style={{ color: '#0F172A', backgroundColor: '#FFFFFF' }}
+                />
               ))}
             </Picker>
           </View>
+          {selectedNozzle ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#EFF6FF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, marginTop: -12, marginBottom: 16, borderWidth: 1, borderColor: '#BFDBFE' }}>
+              <Icon name="funnel-outline" size={16} color="#003C8F" />
+              <Text style={{ fontSize: 13, color: '#003C8F', marginLeft: 6 }}>
+                Selected Nozzle: <Text style={{ fontWeight: 'bold' }}>{nozzles.find(n => n.id === selectedNozzle)?.machineName} - {nozzles.find(n => n.id === selectedNozzle)?.nozzleId}</Text>
+              </Text>
+            </View>
+          ) : null}
 
           {selectedNozzle !== '' && lastMeterReading !== null && (
             <View style={styles.infoBox}>
@@ -175,7 +213,7 @@ export default function ShiftStartScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#F8F9FA' },
-  container: { padding: 20 },
+  container: { padding: 20, paddingBottom: 220 },
   header: { 
     flexDirection: 'row', 
     alignItems: 'center', 
@@ -216,12 +254,13 @@ const styles = StyleSheet.create({
     borderColor: '#D1D5DB', 
     borderRadius: 12, 
     marginBottom: 20, 
-    backgroundColor: '#F9FAFB',
+    backgroundColor: '#FFFFFF',
     overflow: 'hidden' // ensures picker doesn't overflow border radius on some platforms
   },
   picker: {
     height: 50,
     color: '#0F172A',
+    backgroundColor: '#FFFFFF',
   },
   infoBox: {
     flexDirection: 'row',

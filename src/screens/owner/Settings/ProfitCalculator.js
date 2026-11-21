@@ -318,7 +318,8 @@ export default function ProfitCalculator() {
     <ScrollView
       style={styles.container}
       showsVerticalScrollIndicator={false}
-      contentContainerStyle={{ paddingBottom: 50 }}
+      contentContainerStyle={{ paddingBottom: 220 }}
+      keyboardShouldPersistTaps="handled"
     >
       {/* 1. Header Banner */}
       <View style={styles.headerCard}>

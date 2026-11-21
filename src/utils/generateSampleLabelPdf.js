@@ -1,5 +1,6 @@
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Alert } from 'react-native';
 import { PUMP_LOGO_BASE64 } from './pumpLogoBase64';
 
@@ -400,20 +401,36 @@ export const generateAndShareSampleLabelPdf = async (data) => {
   try {
     html = generateSampleLabelHtml(data);
     const invoiceSlug = (data.invoiceNo || 'sample').replace(/[^a-zA-Z0-9]/g, '_');
-    const fileName = `Sample_Label_${data.product || 'MS_HSD'}_${invoiceSlug}_${Date.now()}`;
+    const fileName = `Sample_Label_${data.product || 'MS_HSD'}_${invoiceSlug}_${Date.now()}.pdf`;
 
-    // 1. Generate PDF file via expo-print
-    const { uri: tempUri } = await Print.printToFileAsync({
+    // 1. Generate PDF file via expo-print with base64
+    const printResult = await Print.printToFileAsync({
       html,
-      base64: false
+      base64: true
     });
 
-    // 2. Share PDF
+    let targetUri = printResult.uri;
+
+    // 2. Write to scoped app directory to prevent Android FilePermission issues
+    try {
+      const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+      if (baseDir && printResult.base64) {
+        const destUri = `${baseDir}${fileName}`;
+        await FileSystem.writeAsStringAsync(destUri, printResult.base64, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        targetUri = destUri;
+      }
+    } catch (fsErr) {
+      console.warn('FileSystem scoped write note:', fsErr?.message || fsErr);
+    }
+
+    // 3. Share PDF
     let shareSuccess = false;
     try {
       const isAvailable = await Sharing.isAvailableAsync();
-      if (isAvailable && tempUri) {
-        await Sharing.shareAsync(tempUri, {
+      if (isAvailable && targetUri) {
+        await Sharing.shareAsync(targetUri, {
           mimeType: 'application/pdf',
           dialogTitle: `${fileName} — Retention Sample Label`,
           UTI: 'com.adobe.pdf',
@@ -430,7 +447,7 @@ export const generateAndShareSampleLabelPdf = async (data) => {
       await Print.printAsync({ html });
     }
 
-    return { success: true, uri: tempUri };
+    return { success: true, uri: targetUri };
   } catch (error) {
     console.error('Sample Label PDF generation error:', error);
     try {

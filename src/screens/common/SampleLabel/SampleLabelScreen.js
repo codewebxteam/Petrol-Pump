@@ -262,7 +262,8 @@ export default function SampleLabelScreen() {
             <ScrollView 
               style={{ flex: 1 }} 
               showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ paddingBottom: 40 }}
+              contentContainerStyle={{ paddingBottom: 220 }}
+              keyboardShouldPersistTaps="handled"
             >
               {/* Header Hero Banner */}
               <View style={styles.heroCard}>

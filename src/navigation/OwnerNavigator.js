@@ -8,7 +8,7 @@ import OwnerDashboardScreen from '../screens/owner/OwnerDashboard/OwnerDashboard
 import SettingsScreen from '../screens/owner/Settings/SettingsScreen';
 import ReportsScreen from '../screens/owner/Reports/ReportsScreen';
 import CashManagementScreen from '../screens/owner/CashManagement/CashManagementScreen';
-import SampleLabelScreen from '../screens/common/SampleLabel/SampleLabelScreen';
+import OnloadScreen from '../screens/common/Onload/OnloadScreen';
 
 const Tab = createBottomTabNavigator();
 
@@ -40,8 +40,8 @@ export default function OwnerNavigator({ navigation }) {
             iconName = focused ? 'bar-chart' : 'bar-chart-outline';
           } else if (route.name === 'Cash') {
             iconName = focused ? 'cash' : 'cash-outline';
-          } else if (route.name === 'SampleLabel') {
-            iconName = focused ? 'flask' : 'flask-outline';
+          } else if (route.name === 'Onload') {
+            iconName = focused ? 'funnel' : 'funnel-outline';
           } else if (route.name === 'Reports') {
             iconName = focused ? 'document-text' : 'document-text-outline';
           } else if (route.name === 'Settings') {
@@ -64,7 +64,7 @@ export default function OwnerNavigator({ navigation }) {
     >
       <Tab.Screen name="Dashboard" component={OwnerDashboardScreen} options={{ title: 'Dashboard' }} />
       <Tab.Screen name="Cash" component={CashManagementScreen} options={{ title: 'Cash' }} />
-      <Tab.Screen name="SampleLabel" component={SampleLabelScreen} options={{ title: 'Sample Label', tabBarLabel: 'Sample Label' }} />
+      <Tab.Screen name="Onload" component={OnloadScreen} options={{ title: 'Onload', tabBarLabel: 'Onload' }} />
       <Tab.Screen name="Reports" component={ReportsScreen} options={{ title: 'Report' }} />
       <Tab.Screen name="Settings" component={SettingsScreen} options={{ title: 'Master Config' }} />
     </Tab.Navigator>

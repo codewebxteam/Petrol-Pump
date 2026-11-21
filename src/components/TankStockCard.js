@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withSpring } from 'react-native-reanimated';
 import Icon from '@expo/vector-icons/Ionicons';
 
@@ -34,7 +34,9 @@ export default function TankStockCard({
   fuelType,
   stock,
   petrolStock, 
-  dieselStock
+  dieselStock,
+  dipReading,
+  onEdit
 }) {
   // Determine whether this card is strictly Petrol (Tank 1) or Diesel (Tank 2)
   const isDiesel = fuelType?.toLowerCase() === 'diesel' || 
@@ -49,14 +51,20 @@ export default function TankStockCard({
   const bgTint = isDiesel ? '#F0F7FF' : '#FFF9F2';
   const borderColor = isDiesel ? '#BFDBFE' : '#FED7AA';
 
-  // Compute live stock in Liters
+  // Compute live stock in Liters (Prioritize fuel-specific stock, fallback to general stock)
   let currentStock = 0;
-  if (stock !== undefined && stock !== null) {
-    currentStock = parseFloat(stock) || 0;
-  } else if (isDiesel) {
-    currentStock = parseFloat(dieselStock) || 0;
+  if (isDiesel) {
+    if (dieselStock !== undefined && dieselStock !== null) {
+      currentStock = parseFloat(dieselStock) || 0;
+    } else if (stock !== undefined && stock !== null) {
+      currentStock = parseFloat(stock) || 0;
+    }
   } else {
-    currentStock = parseFloat(petrolStock) || 0;
+    if (petrolStock !== undefined && petrolStock !== null) {
+      currentStock = parseFloat(petrolStock) || 0;
+    } else if (stock !== undefined && stock !== null) {
+      currentStock = parseFloat(stock) || 0;
+    }
   }
 
   return (
@@ -67,10 +75,24 @@ export default function TankStockCard({
           <Icon name={isDiesel ? "water" : "flame"} size={16} color="#fff" style={{ marginRight: 5 }} />
           <Text style={styles.tankBadgeText}>{tankLabel}</Text>
         </View>
-        <View style={[styles.fuelTypePill, { backgroundColor: bgTint, borderColor: themeColor }]}>
-          <Text style={[styles.fuelTypePillText, { color: themeColor }]}>
-            {isDiesel ? '🛢️' : '⛽'} {fuelName}
-          </Text>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <View style={[styles.fuelTypePill, { backgroundColor: bgTint, borderColor: themeColor }]}>
+            <Text style={[styles.fuelTypePillText, { color: themeColor }]}>
+              {isDiesel ? '🛢️' : '⛽'} {fuelName}
+            </Text>
+          </View>
+
+          {onEdit && (
+            <TouchableOpacity 
+              style={[styles.miniEditPill, { borderColor: themeColor, backgroundColor: bgTint }]}
+              onPress={() => onEdit(isDiesel ? 'Tank-2' : 'Tank-1')}
+              activeOpacity={0.7}
+            >
+              <Icon name="create-outline" size={13} color={themeColor} />
+              <Text style={[styles.miniEditPillText, { color: themeColor }]}>Edit</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -92,6 +114,12 @@ export default function TankStockCard({
           <Text style={[styles.currentStockNumber, { color: themeColor }]}>
             {currentStock.toLocaleString('en-IN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} L
           </Text>
+
+          {dipReading ? (
+            <Text style={styles.dipReadingText}>
+              📏 Dip: <Text style={{ fontWeight: '700', color: themeColor }}>{dipReading}</Text>
+            </Text>
+          ) : null}
           
           <View style={[styles.statusBadge, { backgroundColor: bgTint }]}>
             <View style={[styles.statusDot, { backgroundColor: '#16A34A' }]} />
@@ -148,6 +176,25 @@ const styles = StyleSheet.create({
   fuelTypePillText: {
     fontSize: 12,
     fontWeight: 'bold',
+  },
+  miniEditPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3.5,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  miniEditPillText: {
+    fontSize: 11,
+    fontWeight: '800',
+    marginLeft: 3
+  },
+  dipReadingText: {
+    fontSize: 12,
+    color: '#475569',
+    fontWeight: '600',
+    marginBottom: 6,
   },
   bodyRow: {
     flexDirection: 'row',

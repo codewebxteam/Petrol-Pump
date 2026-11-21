@@ -16,15 +16,22 @@ export const generatePdfHtml = (data) => {
     petrolOpening = '0.0000',
     petrolClosing = '0.0000',
     petrolTesting = 0,
+    petrolNormalTesting = 0,
+    petrolOfficialTesting = 0,
     petrolNetSold = 0,
     petrolRate = 0,
     petrolExpected = 0,
     dieselOpening = '0.0000',
     dieselClosing = '0.0000',
     dieselTesting = 0,
+    dieselNormalTesting = 0,
+    dieselOfficialTesting = 0,
     dieselNetSold = 0,
     dieselRate = 0,
     dieselExpected = 0,
+    totalMobilAmount = 0,
+    totalMobilQty = 0,
+    mobilEntries = [],
     totalLitersSold = 0,
     totalExpectedAmount = 0,
     cashAmt = 0,
@@ -52,9 +59,44 @@ export const generatePdfHtml = (data) => {
     hour: '2-digit', minute: '2-digit'
   });
   const isShortage = shortageOrExcess < -0.01;
+  const hasTesting = (parseFloat(petrolTesting) || 0) + (parseFloat(dieselTesting) || 0) > 0;
+  const resolvedShiftNumber = hasTesting ? 1 : 2;
+  const resolvedShiftLabel = resolvedShiftNumber === 1 ? 'Shift 1 (जांच तेल / Testing)' : 'Shift 2 (नो-टेस्टिंग)';
 
-  // Digital entries HTML rows
-  const digitalRowsHtml = digitalEntries
+  const pOfficial = parseFloat(petrolOfficialTesting) || 0;
+  const pNormal = parseFloat(petrolNormalTesting) || (parseFloat(petrolTesting) - pOfficial);
+  const pTestingDetail = pOfficial > 0 
+    ? `${petrolTesting} L (दैनिक: ${pNormal}L + ऑफिशियल: ${pOfficial}L - Tank 1 में वापस)`
+    : `${petrolTesting} L (Tank 1 में वापस)`;
+
+  const dOfficial = parseFloat(dieselOfficialTesting) || 0;
+  const dNormal = parseFloat(dieselNormalTesting) || (parseFloat(dieselTesting) - dOfficial);
+  const dTestingDetail = dOfficial > 0 
+    ? `${dieselTesting} L (दैनिक: ${dNormal}L + ऑफिशियल: ${dOfficial}L - Tank 2 में वापस)`
+    : `${dieselTesting} L (Tank 2 में वापस)`;
+
+  // Digital entries HTML rows: Ensure Paytm, PhonePe, BOB Bank, ATM / POS are fully captured
+  let resolvedDigitalEntries = Array.isArray(digitalEntries) ? [...digitalEntries] : [];
+  if (resolvedDigitalEntries.length === 0) {
+    if (data.paytmAmount && parseFloat(data.paytmAmount) > 0) {
+      resolvedDigitalEntries.push({ name: 'Paytm (पेटीएम)', amount: data.paytmAmount });
+    }
+    if (data.phonePeAmount && parseFloat(data.phonePeAmount) > 0) {
+      resolvedDigitalEntries.push({ name: 'PhonePe (फोनपे)', amount: data.phonePeAmount });
+    }
+    if (data.bobAmount && parseFloat(data.bobAmount) > 0) {
+      resolvedDigitalEntries.push({ name: 'BOB Bank (बैंक ऑफ बड़ौदा)', amount: data.bobAmount });
+    }
+    const cardSum = (parseFloat(data.atmAmount) || 0) + (parseFloat(data.debitCardAmount) || 0) + (parseFloat(data.creditCardAmount) || 0);
+    if (cardSum > 0) {
+      resolvedDigitalEntries.push({ name: 'ATM / POS स्वाइप', amount: cardSum });
+    }
+    if (data.bharatPeAmount && parseFloat(data.bharatPeAmount) > 0) {
+      resolvedDigitalEntries.push({ name: 'BharatPe UPI', amount: data.bharatPeAmount });
+    }
+  }
+
+  const digitalRowsHtml = resolvedDigitalEntries
     .filter(e => parseFloat(e.amount) > 0)
     .map(e => `<tr><td style="padding:4px 8px;border-bottom:1px solid #eee;color:#555;">${e.name}</td><td style="padding:4px 8px;border-bottom:1px solid #eee;text-align:right;font-weight:600;">₹${parseFloat(e.amount).toFixed(0)}</td></tr>`)
     .join('');
@@ -74,6 +116,12 @@ export const generatePdfHtml = (data) => {
         : (e.reason || 'खर्चा');
       return `<tr><td style="padding:4px 8px;border-bottom:1px solid #eee;color:#555;">${label}</td><td style="padding:4px 8px;border-bottom:1px solid #eee;text-align:right;font-weight:600;">₹${parseFloat(e.amount).toFixed(0)}</td></tr>`;
     })
+    .join('');
+
+  // Mobil entries HTML rows
+  const mobilRowsHtml = (mobilEntries || [])
+    .filter(e => parseFloat(e.amount) > 0)
+    .map(e => `<tr><td style="padding:4px 8px;border-bottom:1px solid #eee;color:#333;">${e.packSize || e.name || 'मोबिल'}</td><td style="padding:4px 8px;border-bottom:1px solid #eee;text-align:center;color:#555;">${e.quantity || 1} Pcs</td><td style="padding:4px 8px;border-bottom:1px solid #eee;text-align:right;font-weight:600;">₹${parseFloat(e.amount).toFixed(2)}</td></tr>`)
     .join('');
 
   // Udhari return entries HTML rows
@@ -247,7 +295,7 @@ export const generatePdfHtml = (data) => {
       </div>
       <div class="info-item">
         <div class="info-label">शिफ्ट (Shift)</div>
-        <div class="info-value" style="color:#003C8F;font-weight:bold;">${shiftLabel || ('Shift ' + shiftNumber)}</div>
+        <div class="info-value" style="color:#003C8F;font-weight:bold;">${resolvedShiftLabel}</div>
       </div>
       <div class="info-item">
         <div class="info-label">स्टाफ (Staff)</div>
@@ -272,7 +320,7 @@ export const generatePdfHtml = (data) => {
         <tr><th>विवरण</th><th>मान</th></tr>
         <tr><td>ओपनिंग मीटर</td><td><strong>${petrolOpening}</strong></td></tr>
         <tr><td>क्लोजिंग मीटर</td><td><strong>${petrolClosing}</strong></td></tr>
-        <tr><td>टेस्टिंग (L)</td><td>${petrolTesting} L (Tank 1 में वापस)</td></tr>
+        <tr><td>टेस्टिंग (L)</td><td>${pTestingDetail}</td></tr>
         <tr><td>शुद्ध बिक्री</td><td><strong>${petrolNetSold.toFixed(4)} L</strong></td></tr>
         <tr><td>रेट (₹/L)</td><td>₹${petrolRate}</td></tr>
         <tr style="background:#FFF7ED;"><td style="font-weight:700;">अपेक्षित राशि</td><td style="font-weight:900;color:#FF6F00;">₹${petrolExpected.toFixed(2)}</td></tr>
@@ -289,17 +337,51 @@ export const generatePdfHtml = (data) => {
         <tr><th>विवरण</th><th>मान</th></tr>
         <tr><td>ओपनिंग मीटर</td><td><strong>${dieselOpening}</strong></td></tr>
         <tr><td>क्लोजिंग मीटर</td><td><strong>${dieselClosing}</strong></td></tr>
-        <tr><td>टेस्टिंग (L)</td><td>${dieselTesting} L (Tank 2 में वापस)</td></tr>
+        <tr><td>टेस्टिंग (L)</td><td>${dTestingDetail}</td></tr>
         <tr><td>शुद्ध बिक्री</td><td><strong>${dieselNetSold.toFixed(4)} L</strong></td></tr>
         <tr><td>रेट (₹/L)</td><td>₹${dieselRate}</td></tr>
         <tr style="background:#F0F9FF;"><td style="font-weight:700;">अपेक्षित राशि</td><td style="font-weight:900;color:#0284C7;">₹${dieselExpected.toFixed(2)}</td></tr>
       </table>
 
       <div class="total-row">
-        <span class="total-label">कुल ईंधन बिक्री: ${totalLitersSold.toFixed(4)} L</span>
-        <span class="total-value">₹${totalExpectedAmount.toFixed(2)}</span>
+        <span class="total-label">ईंधन बिक्री: पेट्रोल (${petrolNetSold.toFixed(2)} L) • डीजल (${dieselNetSold.toFixed(2)} L)</span>
+        <span class="total-value">₹${(petrolExpected + dieselExpected).toFixed(2)}</span>
+      </div>
+      ${Number(totalMobilAmount || 0) > 0 ? `
+      <div class="total-row" style="background:#FAF5FF;border-top:1px dashed #DDD6FE;margin-top:4px;">
+        <span class="total-label" style="color:#7C3AED;">+ मोबिल ऑयल बिक्री (${totalMobilQty} Pcs):</span>
+        <span class="total-value" style="color:#7C3AED;">+₹${Number(totalMobilAmount).toFixed(2)}</span>
+      </div>
+      ` : ''}
+      ${Number(udhariReturnTotal || 0) > 0 ? `
+      <div class="total-row" style="background:#F0FDF4;border-top:1px dashed #BBF7D0;margin-top:4px;">
+        <span class="total-label" style="color:#16A34A;">+ उधारी वापसी प्राप्त:</span>
+        <span class="total-value" style="color:#16A34A;">+₹${Number(udhariReturnTotal).toFixed(2)}</span>
+      </div>
+      ` : ''}
+      <div class="total-row" style="background:#EEF2FF;border-top:2px solid #003C8F;margin-top:6px;">
+        <span class="total-label" style="color:#003C8F;font-weight:800;">अपेक्षित कुल जमा (Expected Total):</span>
+        <span class="total-value" style="color:#003C8F;font-size:16px;">₹${totalExpectedAmount.toFixed(2)}</span>
       </div>
     </div>
+
+    ${Number(totalMobilAmount || 0) > 0 ? `
+    <!-- Mobil Section -->
+    <div class="section">
+      <div class="fuel-header">
+        <div class="fuel-dot" style="background:#7C3AED;"></div>
+        <span class="fuel-name" style="color:#7C3AED;">🛢️ अतिरिक्त बिक्री: मोबिल ऑयल (Mobil / Lubricants)</span>
+      </div>
+      <table>
+        <tr><th>आइटम / साइज</th><th style="text-align:center;">मात्रा (Qty)</th><th style="text-align:right;">रकम (₹)</th></tr>
+        ${mobilRowsHtml}
+        <tr style="background:#FAF5FF;">
+          <td colspan="2" style="font-weight:700;color:#7C3AED;">कुल मोबिल बिक्री (${totalMobilQty} Pcs)</td>
+          <td style="font-weight:900;text-align:right;color:#7C3AED;">₹${Number(totalMobilAmount).toFixed(2)}</td>
+        </tr>
+      </table>
+    </div>
+    ` : ''}
 
     <!-- Payment Section -->
     <div class="section">

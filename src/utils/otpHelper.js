@@ -112,17 +112,26 @@ export const verifyEditOtp = async (requestId, enteredOtp) => {
 };
 
 /**
- * Finds an existing daily entry for a specific staff + machine + today's date.
+ * Returns start and end Date objects for a given target date.
+ */
+export const getDayBounds = (targetDate = new Date()) => {
+  const d = new Date(targetDate);
+  const startOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+  const endOfDay = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999);
+  return { startOfDay, endOfDay };
+};
+
+/**
+ * Finds an existing daily entry for a specific staff + machine on a given date.
  * Returns the report document if found, or null.
  */
-export const findTodayEntry = async (salesmanId, machineId) => {
+export const findEntryForDate = async (salesmanId, machineId, targetDate = new Date()) => {
   if (!salesmanId || !machineId) return null;
 
   try {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
+    const { startOfDay, endOfDay } = getDayBounds(targetDate);
 
-    // Query all reports for this machine — filter by date client-side to avoid composite index
+    // Query all reports for this machine and salesman
     const q = query(
       collection(db, 'sales_reports'),
       where('machineId', '==', machineId),
@@ -130,31 +139,41 @@ export const findTodayEntry = async (salesmanId, machineId) => {
     );
     const snapshot = await getDocs(q);
 
-    let todayReport = null;
+    let matchReport = null;
     snapshot.forEach(docSnap => {
       const data = docSnap.data();
-      const reportDate = data.timestamp?.toDate ? data.timestamp.toDate() : (data.timestamp ? new Date(data.timestamp) : null);
-      if (reportDate && reportDate >= startOfDay) {
-        todayReport = { id: docSnap.id, ...data };
+      const reportDate = data.timestamp?.toDate 
+        ? data.timestamp.toDate() 
+        : (data.entryDate?.toDate 
+            ? data.entryDate.toDate() 
+            : (data.timestamp ? new Date(data.timestamp) : (data.entryDate ? new Date(data.entryDate) : null)));
+      if (reportDate && reportDate >= startOfDay && reportDate <= endOfDay) {
+        matchReport = { id: docSnap.id, ...data };
       }
     });
 
-    return todayReport;
+    return matchReport;
   } catch (error) {
-    console.warn('Error finding today entry:', error.message);
+    console.warn('Error finding entry for date:', error.message);
     return null;
   }
 };
 
 /**
- * Fetches all sales reports submitted today for a specific machine.
+ * Backwards compatible findTodayEntry
+ */
+export const findTodayEntry = async (salesmanId, machineId) => {
+  return findEntryForDate(salesmanId, machineId, new Date());
+};
+
+/**
+ * Fetches all sales reports submitted on a specific date for a machine.
  * Returns an array sorted chronologically (earliest first, latest last).
  */
-export const getTodayMachineEntries = async (machineId) => {
+export const getMachineEntriesForDate = async (machineId, targetDate = new Date()) => {
   if (!machineId) return [];
   try {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
+    const { startOfDay, endOfDay } = getDayBounds(targetDate);
 
     const q = query(
       collection(db, 'sales_reports'),
@@ -165,8 +184,12 @@ export const getTodayMachineEntries = async (machineId) => {
     const list = [];
     snapshot.forEach(docSnap => {
       const data = docSnap.data();
-      const reportDate = data.timestamp?.toDate ? data.timestamp.toDate() : (data.timestamp ? new Date(data.timestamp) : null);
-      if (reportDate && reportDate >= startOfDay) {
+      const reportDate = data.timestamp?.toDate 
+        ? data.timestamp.toDate() 
+        : (data.entryDate?.toDate 
+            ? data.entryDate.toDate() 
+            : (data.timestamp ? new Date(data.timestamp) : (data.entryDate ? new Date(data.entryDate) : null)));
+      if (reportDate && reportDate >= startOfDay && reportDate <= endOfDay) {
         list.push({ id: docSnap.id, ...data, parsedDate: reportDate });
       }
     });
@@ -174,8 +197,52 @@ export const getTodayMachineEntries = async (machineId) => {
     list.sort((a, b) => a.parsedDate - b.parsedDate);
     return list;
   } catch (error) {
-    console.warn('Error getting today machine entries:', error.message);
+    console.warn('Error getting machine entries for date:', error.message);
     return [];
+  }
+};
+
+/**
+ * Backwards compatible getTodayMachineEntries
+ */
+export const getTodayMachineEntries = async (machineId) => {
+  return getMachineEntriesForDate(machineId, new Date());
+};
+
+/**
+ * Fetches all reports for a specific date, returning list of salesman IDs and machine IDs with submissions.
+ */
+export const getSubmittedReportsForDate = async (targetDate = new Date()) => {
+  try {
+    const { startOfDay, endOfDay } = getDayBounds(targetDate);
+
+    const snapshot = await getDocs(collection(db, 'sales_reports'));
+    const reportsForDay = [];
+    const submittedSalesmanIds = new Set();
+    const submittedMachineIds = new Set();
+
+    snapshot.forEach(docSnap => {
+      const data = docSnap.data();
+      const reportDate = data.timestamp?.toDate 
+        ? data.timestamp.toDate() 
+        : (data.entryDate?.toDate 
+            ? data.entryDate.toDate() 
+            : (data.timestamp ? new Date(data.timestamp) : (data.entryDate ? new Date(data.entryDate) : null)));
+      if (reportDate && reportDate >= startOfDay && reportDate <= endOfDay) {
+        reportsForDay.push({ id: docSnap.id, ...data });
+        if (data.salesmanId) submittedSalesmanIds.add(data.salesmanId);
+        if (data.machineId) submittedMachineIds.add(data.machineId);
+      }
+    });
+
+    return {
+      reports: reportsForDay,
+      salesmanIds: Array.from(submittedSalesmanIds),
+      machineIds: Array.from(submittedMachineIds)
+    };
+  } catch (error) {
+    console.warn('Error getting submitted reports for date:', error.message);
+    return { reports: [], salesmanIds: [], machineIds: [] };
   }
 };
 

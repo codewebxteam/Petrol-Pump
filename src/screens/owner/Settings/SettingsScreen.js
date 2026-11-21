@@ -1,17 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ScrollView, Modal, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ScrollView, Modal, ActivityIndicator, KeyboardAvoidingView, Platform } from 'react-native';
 import { collection, setDoc, doc, onSnapshot, deleteDoc, writeBatch, query, where, getDocs } from 'firebase/firestore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { db } from '../../../services/firebase';
-import { clearAllPumpData } from '../../../services/dbServices';
 import CustomInput from '../../../components/CustomInput';
 import CustomButton from '../../../components/CustomButton';
+import ScrollableModal from '../../../components/ScrollableModal';
 import { Picker } from '@react-native-picker/picker';
 import Icon from '@expo/vector-icons/Ionicons';
 import Toast from 'react-native-toast-message';
 import AddStockScreen from '../AddStock/AddStockScreen';
 import SalesmanRegistrationScreen from '../SalesmanRegistration/SalesmanRegistrationScreen';
 import ProfitCalculator from './ProfitCalculator';
+import AdminExpenses from './AdminExpenses';
 import AdminManagement from './AdminManagement';
 
 // Helper to determine next machine number, name, and nozzles
@@ -33,8 +34,7 @@ const calculateNextMachineInfo = (existingMachines = []) => {
 };
 
 export default function SettingsScreen() {
-  const [activeMainTab, setActiveMainTab] = useState('system'); // 'system', 'stock', 'staff', 'profit', 'reset'
-  const [isResetting, setIsResetting] = useState(false);
+  const [activeMainTab, setActiveMainTab] = useState('system'); // 'system', 'stock', 'staff', 'profit', 'expenses', 'security'
   
   const [activeTab, setActiveTab] = useState('machine'); // 'machine' or 'nozzle'
   const [isModalVisible, setIsModalVisible] = useState(false);
@@ -313,58 +313,7 @@ export default function SettingsScreen() {
     );
   };
 
-  const confirmFullReset = () => {
-    Alert.alert(
-      "🚨 Are you sure you want to delete ALL data?",
-      "This action is irreversible! All sales reports, machines, nozzles, tank logs, staff records, and meter readings will be permanently erased and the app will be reset to factory defaults.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Yes, Delete Everything", 
-          style: "destructive",
-          onPress: () => handlePerformReset({ deleteMachines: true, deleteStaff: true, resetTanks: true })
-        }
-      ]
-    );
-  };
 
-  const confirmReportsReset = () => {
-    Alert.alert(
-      "📊 Clear Sales Reports Only?",
-      "All previous sales reports and tank logs will be deleted. Your machines, nozzles, and staff records will remain intact.",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Yes, Clear Reports", 
-          style: "destructive",
-          onPress: () => handlePerformReset({ deleteMachines: false, deleteStaff: false, resetTanks: false })
-        }
-      ]
-    );
-  };
-
-  const handlePerformReset = async (options) => {
-    setIsResetting(true);
-    try {
-      await clearAllPumpData(options);
-      Toast.show({
-        type: 'success',
-        text1: 'Reset Completed Successfully!',
-        text2: options.deleteMachines ? 'All data cleared. App is reset to factory state.' : 'All past sales reports have been deleted.'
-      });
-      Alert.alert(
-        "Success!",
-        options.deleteMachines 
-          ? "All historical data has been successfully cleared. The app is ready for fresh entries." 
-          : "All past reports have been successfully cleared."
-      );
-    } catch (error) {
-      console.error("Reset error:", error);
-      Alert.alert("Error", error.message || "Failed to reset data.");
-    } finally {
-      setIsResetting(false);
-    }
-  };
 
   // Helper to resolve actual meter readings for a machine
   const getMachineMeters = (item) => {
@@ -642,18 +591,18 @@ export default function SettingsScreen() {
             <Text style={[styles.mainTabText, activeMainTab === 'profit' && { color: '#16A34A', fontWeight: '900' }]}>Profit Calc 💰</Text>
           </TouchableOpacity>
           <TouchableOpacity 
+            style={[styles.mainTab, activeMainTab === 'expenses' && styles.activeMainTab, activeMainTab === 'expenses' && { borderColor: '#EA580C', borderWidth: 1 }]}
+            onPress={() => setActiveMainTab('expenses')}
+          >
+            <Icon name="cash-outline" size={15} color={activeMainTab === 'expenses' ? '#EA580C' : '#64748B'} style={{ marginRight: 5 }} />
+            <Text style={[styles.mainTabText, activeMainTab === 'expenses' && { color: '#EA580C', fontWeight: '900' }]}>Add Expenses 💸</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
             style={[styles.mainTab, activeMainTab === 'security' && styles.activeMainTab, activeMainTab === 'security' && { borderColor: '#003C8F', borderWidth: 1 }]}
             onPress={() => setActiveMainTab('security')}
           >
             <Icon name="shield-checkmark-outline" size={15} color={activeMainTab === 'security' ? '#003C8F' : '#64748B'} style={{ marginRight: 5 }} />
             <Text style={[styles.mainTabText, activeMainTab === 'security' && { color: '#003C8F', fontWeight: '900' }]}>Admin Security 🔐</Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.mainTab, activeMainTab === 'reset' && styles.activeMainTab, activeMainTab === 'reset' && { backgroundColor: '#FEE2E2' }]}
-            onPress={() => setActiveMainTab('reset')}
-          >
-            <Icon name="trash-outline" size={15} color={activeMainTab === 'reset' ? '#DC2626' : '#64748B'} style={{ marginRight: 5 }} />
-            <Text style={[styles.mainTabText, activeMainTab === 'reset' && { color: '#DC2626', fontWeight: '900' }]}>Reset Data</Text>
           </TouchableOpacity>
         </ScrollView>
       </View>
@@ -677,110 +626,19 @@ export default function SettingsScreen() {
         </View>
       )}
 
+      {activeMainTab === 'expenses' && (
+        <View style={{ flex: 1, marginHorizontal: -15, marginBottom: -15 }}>
+          <AdminExpenses />
+        </View>
+      )}
+
       {activeMainTab === 'security' && (
         <View style={{ flex: 1, marginHorizontal: -15, marginBottom: -15 }}>
           <AdminManagement />
         </View>
       )}
 
-      {activeMainTab === 'reset' && (
-        <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 30 }}>
-          {/* Header Banner */}
-          <View style={styles.resetHeaderBanner}>
-            <Icon name="warning" size={36} color="#DC2626" />
-            <Text style={styles.resetHeaderTitle}>Data Cleanup & Reset Center (Danger Zone)</Text>
-            <Text style={styles.resetHeaderSubtitle}>
-              Clean up test or previous data safely to start fresh with daily entries.
-            </Text>
-          </View>
 
-          {/* Option 1: Complete Wipe / Factory Reset */}
-          <View style={styles.resetCard}>
-            <View style={styles.resetCardHeader}>
-              <View style={[styles.dangerBadge, { backgroundColor: '#DC2626' }]}>
-                <Text style={styles.dangerBadgeText}>🚨 Factory Reset (Wipe All Data)</Text>
-              </View>
-              <Text style={styles.resetCardTitle}>Delete All Historical Data</Text>
-              <Text style={styles.resetCardDesc}>
-                All data will be completely deleted to reset the app to factory state:
-              </Text>
-            </View>
-
-            <View style={styles.resetFeatureList}>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="trash-outline" size={16} color="#DC2626" />
-                <Text style={styles.resetFeatureText}>All daily sales & shift reports</Text>
-              </View>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="trash-outline" size={16} color="#DC2626" />
-                <Text style={styles.resetFeatureText}>All tank logs & testing fuel records</Text>
-              </View>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="trash-outline" size={16} color="#DC2626" />
-                <Text style={styles.resetFeatureText}>All machines (DU1, DU2...) & nozzles (N1, N2...)</Text>
-              </View>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="trash-outline" size={16} color="#DC2626" />
-                <Text style={styles.resetFeatureText}>All registered salesman / staff records</Text>
-              </View>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="refresh-outline" size={16} color="#2563EB" />
-                <Text style={styles.resetFeatureText}>Reset Tank 1 (Petrol) & Tank 2 (Diesel) stocks to 0</Text>
-              </View>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="refresh-outline" size={16} color="#2563EB" />
-                <Text style={styles.resetFeatureText}>Clear all meter reading cache & testing flags</Text>
-              </View>
-            </View>
-
-            <TouchableOpacity 
-              style={[styles.resetButton, { backgroundColor: '#DC2626' }]}
-              onPress={confirmFullReset}
-              disabled={isResetting}
-            >
-              <Icon name="trash" size={20} color="#fff" style={{ marginRight: 8 }} />
-              <Text style={styles.resetButtonText}>Permanently Delete All Data</Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Option 2: Clear Sales & Shift Reports Only */}
-          <View style={[styles.resetCard, { borderColor: '#FDBA74', marginTop: 16 }]}>
-            <View style={styles.resetCardHeader}>
-              <View style={[styles.dangerBadge, { backgroundColor: '#EA580C' }]}>
-                <Text style={styles.dangerBadgeText}>📊 Clear Reports Only</Text>
-              </View>
-              <Text style={styles.resetCardTitle}>Delete Sales Reports & Logs Only</Text>
-              <Text style={styles.resetCardDesc}>
-                Keep machines and staff intact, only delete previous sales records:
-              </Text>
-            </View>
-
-            <View style={styles.resetFeatureList}>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="trash-outline" size={16} color="#EA580C" />
-                <Text style={styles.resetFeatureText}>All daily sales reports & shifts will be deleted</Text>
-              </View>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="trash-outline" size={16} color="#EA580C" />
-                <Text style={styles.resetFeatureText}>All tank logs will be deleted</Text>
-              </View>
-              <View style={styles.resetFeatureItem}>
-                <Icon name="checkmark-circle-outline" size={16} color="#16A34A" />
-                <Text style={[styles.resetFeatureText, { color: '#16A34A', fontWeight: 'bold' }]}>Your machines, nozzles, and staff remain safe</Text>
-              </View>
-            </View>
-
-            <TouchableOpacity 
-              style={[styles.resetButton, { backgroundColor: '#EA580C' }]}
-              onPress={confirmReportsReset}
-              disabled={isResetting}
-            >
-              <Icon name="document-text-outline" size={20} color="#fff" style={{ marginRight: 8 }} />
-              <Text style={styles.resetButtonText}>Clear Sales Reports Only</Text>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      )}
       
       {activeMainTab === 'system' && (
         <View style={{ flex: 1 }}>
@@ -813,194 +671,171 @@ export default function SettingsScreen() {
         </View>
       )}
 
-      {/* Loading Overlay Modal for Reset */}
-      <Modal transparent={true} visible={isResetting} animationType="fade">
-        <View style={styles.loadingOverlay}>
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color="#DC2626" />
-            <Text style={styles.loadingTitle}>Clearing Data...</Text>
-            <Text style={styles.loadingSubtitle}>Please do not close the app, this may take a few seconds.</Text>
-          </View>
-        </View>
-      </Modal>
+
 
       {/* Modal for Creating Machine */}
-      <Modal
-        animationType="slide"
-        transparent={true}
+      <ScrollableModal
         visible={isModalVisible}
         onRequestClose={() => setIsModalVisible(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContentWrapper}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Add New Dispenser Machine</Text>
-                <Text style={styles.modalSubTitle}>Auto-Configured: 1 Petrol + 1 Diesel Nozzle</Text>
-              </View>
-              <TouchableOpacity onPress={() => setIsModalVisible(false)}>
-                <Icon name="close-circle" size={28} color="#d32f2f" />
-              </TouchableOpacity>
-            </View>
-            
-            <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
-              <View style={styles.infoBanner}>
-                <Icon name="information-circle-outline" size={18} color="#003C8F" style={{marginRight: 6}} />
-                <Text style={styles.infoBannerText}>
-                  Each machine is auto-configured with 1 Petrol nozzle (Tank 1) and 1 Diesel nozzle (Tank 2).
-                </Text>
-              </View>
-
-              {/* Machine Name */}
-              <CustomInput 
-                label="Machine Name *"
-                placeholder="e.g. DU1, DU2, DU3" 
-                value={newMachineName} 
-                onChangeText={handleMachineNameChange} 
-                leftIcon="hardware-chip-outline"
-              />
-
-              {/* Auto Configured Nozzles Cards */}
-              <View style={styles.nozzlePreviewContainer}>
-                <Text style={styles.previewSectionTitle}>Auto-Assigned Nozzles:</Text>
-                
-                {/* Petrol Nozzle Preview */}
-                <View style={[styles.nozzlePreviewCard, { borderColor: '#FF6F00' }]}>
-                  <View style={styles.nozzlePreviewHeader}>
-                    <View style={[styles.fuelDot, { backgroundColor: '#FF6F00' }]} />
-                    <Text style={[styles.nozzlePreviewName, { color: '#FF6F00' }]}>
-                      Nozzle {petrolNozzleId}: Petrol (MS)
-                    </Text>
-                    <View style={[styles.tankBadgeMini, { backgroundColor: '#FFF3E0' }]}>
-                      <Text style={{ color: '#E65100', fontSize: 11, fontWeight: 'bold' }}>Tank 1</Text>
-                    </View>
-                  </View>
-                  <CustomInput 
-                    label={`Opening Meter Reading (${petrolNozzleId})`}
-                    value={petrolInitialMeter}
-                    onChangeText={setPetrolInitialMeter}
-                    keyboardType="numeric"
-                    placeholder="0.0000"
-                    leftIcon="speedometer-outline"
-                  />
-                </View>
-
-                {/* Diesel Nozzle Preview */}
-                <View style={[styles.nozzlePreviewCard, { borderColor: '#003C8F', marginTop: 12 }]}>
-                  <View style={styles.nozzlePreviewHeader}>
-                    <View style={[styles.fuelDot, { backgroundColor: '#003C8F' }]} />
-                    <Text style={[styles.nozzlePreviewName, { color: '#003C8F' }]}>
-                      Nozzle {dieselNozzleId}: Diesel (HSD)
-                    </Text>
-                    <View style={[styles.tankBadgeMini, { backgroundColor: '#E3F2FD' }]}>
-                      <Text style={{ color: '#003C8F', fontSize: 11, fontWeight: 'bold' }}>Tank 2</Text>
-                    </View>
-                  </View>
-                  <CustomInput 
-                    label={`Opening Meter Reading (${dieselNozzleId})`}
-                    value={dieselInitialMeter}
-                    onChangeText={setDieselInitialMeter}
-                    keyboardType="numeric"
-                    placeholder="0.0000"
-                    leftIcon="speedometer-outline"
-                  />
-                </View>
-              </View>
-
-              <CustomButton 
-                title="Save Machine & Nozzles" 
-                onPress={handleCreateMachine} 
-                loading={isCreatingMachine} 
-                type="primary"
-                style={{ marginTop: 18, marginBottom: 20 }} 
-              />
-            </ScrollView>
+        <View style={styles.modalHeader}>
+          <View>
+            <Text style={styles.modalTitle}>Add New Dispenser Machine</Text>
+            <Text style={styles.modalSubTitle}>Auto-Configured: 1 Petrol + 1 Diesel Nozzle</Text>
           </View>
+          <TouchableOpacity onPress={() => setIsModalVisible(false)}>
+            <Icon name="close-circle" size={28} color="#d32f2f" />
+          </TouchableOpacity>
         </View>
-      </Modal>
+        
+        <View style={styles.infoBanner}>
+          <Icon name="information-circle-outline" size={18} color="#003C8F" style={{marginRight: 6}} />
+          <Text style={styles.infoBannerText}>
+            Each machine is auto-configured with 1 Petrol nozzle (Tank 1) and 1 Diesel nozzle (Tank 2).
+          </Text>
+        </View>
 
-      {/* Modal for Editing Machine Meters */}
-      <Modal
-        animationType="fade"
-        transparent={true}
-        visible={isEditMeterModalVisible}
-        onRequestClose={() => setIsEditMeterModalVisible(false)}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContentWrapper}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Update Meter Readings</Text>
-                <Text style={styles.modalSubTitle}>
-                  {editingMachine ? `${editingMachine.name || editingMachine.id} Dispensers` : 'Adjust current nozzle meters'}
-                </Text>
-              </View>
-              <TouchableOpacity onPress={() => setIsEditMeterModalVisible(false)}>
-                <Icon name="close-circle-outline" size={28} color="#94A3B8" />
-              </TouchableOpacity>
-            </View>
+        {/* Machine Name */}
+        <CustomInput 
+          label="Machine Name *"
+          placeholder="e.g. DU1, DU2, DU3" 
+          value={newMachineName} 
+          onChangeText={handleMachineNameChange} 
+          leftIcon="hardware-chip-outline"
+        />
 
-            <View style={styles.infoBanner}>
-              <Icon name="information-circle" size={20} color="#003C8F" style={{ marginRight: 8 }} />
-              <Text style={styles.infoBannerText}>
-                Set or adjust current meter readings for this machine. Live daily shift entries will advance automatically from these values.
+        {/* Auto Configured Nozzles Cards */}
+        <View style={styles.nozzlePreviewContainer}>
+          <Text style={styles.previewSectionTitle}>Auto-Assigned Nozzles:</Text>
+          
+          {/* Petrol Nozzle Preview */}
+          <View style={[styles.nozzlePreviewCard, { borderColor: '#FF6F00' }]}>
+            <View style={styles.nozzlePreviewHeader}>
+              <View style={[styles.fuelDot, { backgroundColor: '#FF6F00' }]} />
+              <Text style={[styles.nozzlePreviewName, { color: '#FF6F00' }]}>
+                Nozzle {petrolNozzleId}: Petrol (MS)
               </Text>
-            </View>
-
-            <View style={{ marginTop: 10 }}>
-              {/* Petrol Nozzle Meter */}
-              <View style={[styles.nozzlePreviewCard, { borderColor: '#FF6F00', marginBottom: 12 }]}>
-                <View style={styles.nozzlePreviewHeader}>
-                  <View style={[styles.fuelDot, { backgroundColor: '#FF6F00' }]} />
-                  <Text style={[styles.nozzlePreviewName, { color: '#FF6F00' }]}>
-                    {editingMachine?.petrolNozzle || 'N1'}: Petrol (MS)
-                  </Text>
-                  <View style={[styles.tankBadgeMini, { backgroundColor: '#FFF3E0' }]}>
-                    <Text style={{ color: '#E65100', fontSize: 11, fontWeight: 'bold' }}>Tank 1</Text>
-                  </View>
-                </View>
-                <CustomInput 
-                  label="Current Meter Reading"
-                  value={editPetrolMeter}
-                  onChangeText={setEditPetrolMeter}
-                  keyboardType="numeric"
-                  placeholder="0.0000"
-                  leftIcon="speedometer-outline"
-                />
-              </View>
-
-              {/* Diesel Nozzle Meter */}
-              <View style={[styles.nozzlePreviewCard, { borderColor: '#003C8F' }]}>
-                <View style={styles.nozzlePreviewHeader}>
-                  <View style={[styles.fuelDot, { backgroundColor: '#003C8F' }]} />
-                  <Text style={[styles.nozzlePreviewName, { color: '#003C8F' }]}>
-                    {editingMachine?.dieselNozzle || 'N2'}: Diesel (HSD)
-                  </Text>
-                  <View style={[styles.tankBadgeMini, { backgroundColor: '#E3F2FD' }]}>
-                    <Text style={{ color: '#003C8F', fontSize: 11, fontWeight: 'bold' }}>Tank 2</Text>
-                  </View>
-                </View>
-                <CustomInput 
-                  label="Current Meter Reading"
-                  value={editDieselMeter}
-                  onChangeText={setEditDieselMeter}
-                  keyboardType="numeric"
-                  placeholder="0.0000"
-                  leftIcon="speedometer-outline"
-                />
+              <View style={[styles.tankBadgeMini, { backgroundColor: '#FFF3E0' }]}>
+                <Text style={{ color: '#E65100', fontSize: 11, fontWeight: 'bold' }}>Tank 1</Text>
               </View>
             </View>
+            <CustomInput 
+              label={`Opening Meter Reading (${petrolNozzleId})`}
+              value={petrolInitialMeter}
+              onChangeText={setPetrolInitialMeter}
+              keyboardType="numeric"
+              placeholder="0.0000"
+              leftIcon="speedometer-outline"
+            />
+          </View>
 
-            <CustomButton 
-              title="Save Meter Readings" 
-              onPress={handleSaveMeters} 
-              loading={isSavingMeters} 
-              type="primary"
-              style={{ marginTop: 20 }} 
+          {/* Diesel Nozzle Preview */}
+          <View style={[styles.nozzlePreviewCard, { borderColor: '#003C8F', marginTop: 12 }]}>
+            <View style={styles.nozzlePreviewHeader}>
+              <View style={[styles.fuelDot, { backgroundColor: '#003C8F' }]} />
+              <Text style={[styles.nozzlePreviewName, { color: '#003C8F' }]}>
+                Nozzle {dieselNozzleId}: Diesel (HSD)
+              </Text>
+              <View style={[styles.tankBadgeMini, { backgroundColor: '#E3F2FD' }]}>
+                <Text style={{ color: '#003C8F', fontSize: 11, fontWeight: 'bold' }}>Tank 2</Text>
+              </View>
+            </View>
+            <CustomInput 
+              label={`Opening Meter Reading (${dieselNozzleId})`}
+              value={dieselInitialMeter}
+              onChangeText={setDieselInitialMeter}
+              keyboardType="numeric"
+              placeholder="0.0000"
+              leftIcon="speedometer-outline"
             />
           </View>
         </View>
-      </Modal>
+
+        <CustomButton 
+          title="Save Machine & Nozzles" 
+          onPress={handleCreateMachine} 
+          loading={isCreatingMachine} 
+          type="primary"
+          style={{ marginTop: 18, marginBottom: 8 }} 
+        />
+      </ScrollableModal>
+
+      {/* Modal for Editing Machine Meters */}
+      <ScrollableModal
+        visible={isEditMeterModalVisible}
+        onRequestClose={() => setIsEditMeterModalVisible(false)}
+      >
+        <View style={styles.modalHeader}>
+          <View>
+            <Text style={styles.modalTitle}>Update Meter Readings</Text>
+            <Text style={styles.modalSubTitle}>
+              {editingMachine ? `${editingMachine.name || editingMachine.id} Dispensers` : 'Adjust current nozzle meters'}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={() => setIsEditMeterModalVisible(false)}>
+            <Icon name="close-circle-outline" size={28} color="#94A3B8" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.infoBanner}>
+          <Icon name="information-circle" size={20} color="#003C8F" style={{ marginRight: 8 }} />
+          <Text style={styles.infoBannerText}>
+            Set or adjust current meter readings for this machine. Live daily shift entries will advance automatically from these values.
+          </Text>
+        </View>
+
+        <View style={{ marginTop: 10 }}>
+          {/* Petrol Nozzle Meter */}
+          <View style={[styles.nozzlePreviewCard, { borderColor: '#FF6F00', marginBottom: 12 }]}>
+            <View style={styles.nozzlePreviewHeader}>
+              <View style={[styles.fuelDot, { backgroundColor: '#FF6F00' }]} />
+              <Text style={[styles.nozzlePreviewName, { color: '#FF6F00' }]}>
+                {editingMachine?.petrolNozzle || 'N1'}: Petrol (MS)
+              </Text>
+              <View style={[styles.tankBadgeMini, { backgroundColor: '#FFF3E0' }]}>
+                <Text style={{ color: '#E65100', fontSize: 11, fontWeight: 'bold' }}>Tank 1</Text>
+              </View>
+            </View>
+            <CustomInput 
+              label="Current Meter Reading"
+              value={editPetrolMeter}
+              onChangeText={setEditPetrolMeter}
+              keyboardType="numeric"
+              placeholder="0.0000"
+              leftIcon="speedometer-outline"
+            />
+          </View>
+
+          {/* Diesel Nozzle Meter */}
+          <View style={[styles.nozzlePreviewCard, { borderColor: '#003C8F' }]}>
+            <View style={styles.nozzlePreviewHeader}>
+              <View style={[styles.fuelDot, { backgroundColor: '#003C8F' }]} />
+              <Text style={[styles.nozzlePreviewName, { color: '#003C8F' }]}>
+                {editingMachine?.dieselNozzle || 'N2'}: Diesel (HSD)
+              </Text>
+              <View style={[styles.tankBadgeMini, { backgroundColor: '#E3F2FD' }]}>
+                <Text style={{ color: '#003C8F', fontSize: 11, fontWeight: 'bold' }}>Tank 2</Text>
+              </View>
+            </View>
+            <CustomInput 
+              label="Current Meter Reading"
+              value={editDieselMeter}
+              onChangeText={setEditDieselMeter}
+              keyboardType="numeric"
+              placeholder="0.0000"
+              leftIcon="speedometer-outline"
+            />
+          </View>
+        </View>
+
+        <CustomButton 
+          title="Save Meter Readings" 
+          onPress={handleSaveMeters} 
+          loading={isSavingMeters} 
+          type="primary"
+          style={{ marginTop: 20, marginBottom: 8 }} 
+        />
+      </ScrollableModal>
     </View>
   );
 }
@@ -1023,8 +858,9 @@ const styles = StyleSheet.create({
   emptyStateTitle: { fontSize: 18, fontWeight: 'bold', color: '#475569', marginTop: 10 },
   emptyStateSub: { fontSize: 13, color: '#94A3B8', textAlign: 'center', marginTop: 6, lineHeight: 18 },
 
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 16 },
-  modalContentWrapper: { width: '100%', backgroundColor: '#fff', borderRadius: 16, padding: 20, elevation: 5, maxHeight: '85%' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' },
+  modalScrollOverlay: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 16, paddingVertical: 30 },
+  modalContentWrapper: { width: '100%', maxWidth: 500, backgroundColor: '#fff', borderRadius: 16, padding: 20, elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.15, shadowRadius: 10 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, borderBottomWidth: 1, borderBottomColor: '#f1f5f9', paddingBottom: 10 },
   modalTitle: { fontSize: 18, fontWeight: '900', color: '#003C8F' },
   modalSubTitle: { fontSize: 11, color: '#64748B', fontWeight: '600', marginTop: 2 },
@@ -1058,24 +894,5 @@ const styles = StyleSheet.create({
   meterPillLabel: { fontSize: 9, fontWeight: '800', color: '#64748B', marginRight: 4 },
   meterPillValue: { fontSize: 12, color: '#0F172A', fontWeight: 'bold' },
   meterPillText: { fontSize: 11, color: '#334155', fontWeight: 'bold' },
-
-  resetHeaderBanner: { backgroundColor: '#FEF2F2', borderWidth: 1, borderColor: '#FCA5A5', borderRadius: 12, padding: 16, alignItems: 'center', marginBottom: 16 },
-  resetHeaderTitle: { fontSize: 16, fontWeight: '900', color: '#991B1B', marginTop: 8, textAlign: 'center' },
-  resetHeaderSubtitle: { fontSize: 12, color: '#B91C1C', textAlign: 'center', marginTop: 4, lineHeight: 18 },
-  resetCard: { backgroundColor: '#fff', borderRadius: 14, borderWidth: 1.5, borderColor: '#FCA5A5', padding: 16, elevation: 2 },
-  resetCardHeader: { marginBottom: 12 },
-  dangerBadge: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, marginBottom: 8 },
-  dangerBadgeText: { color: '#fff', fontSize: 11, fontWeight: 'bold' },
-  resetCardTitle: { fontSize: 17, fontWeight: '900', color: '#1E293B' },
-  resetCardDesc: { fontSize: 13, color: '#64748B', marginTop: 4 },
-  resetFeatureList: { backgroundColor: '#F8FAFC', borderRadius: 10, padding: 12, marginBottom: 16, borderWidth: 1, borderColor: '#E2E8F0' },
-  resetFeatureItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  resetFeatureText: { fontSize: 13, color: '#334155', marginLeft: 8, flex: 1 },
-  resetButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 14, borderRadius: 10, elevation: 2 },
-  resetButtonText: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
-  loadingOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  loadingBox: { backgroundColor: '#fff', borderRadius: 16, padding: 24, alignItems: 'center', width: '85%', elevation: 5 },
-  loadingTitle: { fontSize: 16, fontWeight: 'bold', color: '#1E293B', marginTop: 14 },
-  loadingSubtitle: { fontSize: 12, color: '#64748B', textAlign: 'center', marginTop: 6 }
 });
 

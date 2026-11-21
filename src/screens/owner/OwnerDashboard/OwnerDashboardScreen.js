@@ -2,25 +2,35 @@ import React, { useState, useEffect, useContext, useMemo } from 'react';
 import { 
   View, 
   Text, 
+  TextInput, 
+  Image,
   StyleSheet, 
   FlatList, 
   TouchableOpacity, 
   ScrollView, 
   Dimensions, 
   ActivityIndicator, 
-  RefreshControl,
-  Modal
+  RefreshControl, 
+  Modal, 
+  KeyboardAvoidingView, 
+  Platform 
 } from 'react-native';
-import { collection, onSnapshot, query, where, doc, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot, query, where, doc, updateDoc, orderBy, limit } from 'firebase/firestore';
 import { db } from '../../../services/firebase';
 import { 
   getMonthKey, 
   getPreviousMonthKey, 
   formatMonthLabel, 
-  getStaffMonthlyAttendance 
+  getLocalDateString,
+  getStaffMonthlyAttendance,
+  syncAndConsolidateTanks,
+  updateTankStockManual,
+  cleanupOldDailyPhotos
 } from '../../../services/dbServices';
 import { AuthContext } from '../../../context/AuthContext';
 import TankStockCard from '../../../components/TankStockCard';
+import ScrollableModal from '../../../components/ScrollableModal';
+import ImageViewerModal from '../../../components/ImageViewerModal';
 import Icon from '@expo/vector-icons/Ionicons';
 import Toast from 'react-native-toast-message';
 
@@ -38,12 +48,7 @@ export default function OwnerDashboardScreen({ navigation }) {
   const [allSales, setAllSales] = useState([]);
   const [editRequests, setEditRequests] = useState([]);
 
-  const fallbackMachines = [
-    { id: 'DU1', name: 'DU1', petrolNozzle: 'N1', dieselNozzle: 'N2' },
-    { id: 'DU2', name: 'DU2', petrolNozzle: 'N3', dieselNozzle: 'N4' },
-    { id: 'DU3', name: 'DU3', petrolNozzle: 'N5', dieselNozzle: 'N6' }
-  ];
-  const effectiveMachines = machines.length > 0 ? machines : fallbackMachines;
+  const effectiveMachines = machines;
   
   // Staff Salary / Advance States
   const [salaryAdvances, setSalaryAdvances] = useState([]);
@@ -53,13 +58,46 @@ export default function OwnerDashboardScreen({ navigation }) {
   // Dedicated Staff Attendance & Advance Modal State (Active Staff Click)
   const [selectedStaffModal, setSelectedStaffModal] = useState(null);
   const [staffModalMonth, setStaffModalMonth] = useState(getMonthKey());
+
+  // Stock Edit Modal State (Admin Stock / Dip Adjustment)
+  const [showStockEditModal, setShowStockEditModal] = useState(false);
+  const [editTank1Liters, setEditTank1Liters] = useState('');
+  const [editTank1Dip, setEditTank1Dip] = useState('');
+  const [editTank2Liters, setEditTank2Liters] = useState('');
+  const [editTank2Dip, setEditTank2Dip] = useState('');
+  const [savingStockEdit, setSavingStockEdit] = useState(false);
   
   // UI & Filter States
   const [timeFilter, setTimeFilter] = useState('today'); // 'today', 'yesterday', 'week', 'month'
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Interactive Drilldown Modal State for Cards
+  const [drilldownModal, setDrilldownModal] = useState({
+    visible: false,
+    title: '',
+    subtitle: '',
+    icon: 'wallet-outline',
+    color: '#003C8F',
+    items: [],
+    totalVal: '',
+    totalLabel: 'Total'
+  });
+
+  // Daily Pump Photos State (Staff Live Inspection Photos)
+  const [dailyPhotosList, setDailyPhotosList] = useState([]);
+  const [fullscreenViewerData, setFullscreenViewerData] = useState({
+    visible: false,
+    images: [],
+    titles: [],
+    initialIndex: 0,
+    title: 'Daily Pump Photo'
+  });
+  const [showDailyPhotosModal, setShowDailyPhotosModal] = useState(false);
+
   useEffect(() => {
+    syncAndConsolidateTanks().catch(() => null);
+
     // 1. Tanks Listener
     const unsubTanks = onSnapshot(collection(db, 'tanks'), (snapshot) => {
       const list = [];
@@ -158,6 +196,37 @@ export default function OwnerDashboardScreen({ navigation }) {
       console.warn("Firestore snapshot error (staff_salary_advances):", error.message);
     });
 
+    // 8. Daily Pump Photos Listener (Auto-purges & filters to last 5 days)
+    cleanupOldDailyPhotos(5).catch(() => {});
+
+    const qPhotos = query(collection(db, 'daily_pump_photos'), orderBy('timestamp', 'desc'), limit(60));
+    const unsubPhotos = onSnapshot(qPhotos, (snapshot) => {
+      const fiveDaysAgoMs = Date.now() - 5 * 24 * 60 * 60 * 1000;
+      const list = [];
+      snapshot.forEach(d => {
+        const data = d.data();
+        let photoTime = 0;
+        if (data.timestamp?.toDate) {
+          photoTime = data.timestamp.toDate().getTime();
+        } else if (data.timestamp) {
+          photoTime = new Date(data.timestamp).getTime();
+        } else if (data.createdAt?.toDate) {
+          photoTime = data.createdAt.toDate().getTime();
+        } else if (data.createdAt) {
+          photoTime = new Date(data.createdAt).getTime();
+        } else if (data.dateStr) {
+          photoTime = new Date(data.dateStr).getTime();
+        }
+
+        if (photoTime >= fiveDaysAgoMs) {
+          list.push({ id: d.id, ...data });
+        }
+      });
+      setDailyPhotosList(list);
+    }, (error) => {
+      console.warn("Firestore snapshot error (daily_pump_photos):", error.message);
+    });
+
     return () => {
       unsubTanks();
       unsubUsers();
@@ -166,6 +235,7 @@ export default function OwnerDashboardScreen({ navigation }) {
       unsubSales();
       unsubEdit();
       unsubSalary();
+      unsubPhotos();
     };
   }, []);
 
@@ -264,6 +334,50 @@ export default function OwnerDashboardScreen({ navigation }) {
     return allSales;
   }, [allSales, timeFilter]);
 
+  // Filtered Salary Advances based on Time Filter
+  const filteredSalaryAdvances = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    if (timeFilter === 'today') {
+      return salaryAdvances.filter(s => {
+        const d = s.timestamp?.toDate ? s.timestamp.toDate() : new Date(s.timestamp || s.date || 0);
+        return d >= startOfToday && d <= endOfToday;
+      });
+    }
+
+    if (timeFilter === 'yesterday') {
+      const startOfYesterday = new Date(startOfToday);
+      startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+      const endOfYesterday = new Date(endOfToday);
+      endOfYesterday.setDate(endOfYesterday.getDate() - 1);
+      return salaryAdvances.filter(s => {
+        const d = s.timestamp?.toDate ? s.timestamp.toDate() : new Date(s.timestamp || s.date || 0);
+        return d >= startOfYesterday && d <= endOfYesterday;
+      });
+    }
+
+    if (timeFilter === 'week') {
+      const startOfWeek = new Date(startOfToday);
+      startOfWeek.setDate(startOfWeek.getDate() - 7);
+      return salaryAdvances.filter(s => {
+        const d = s.timestamp?.toDate ? s.timestamp.toDate() : new Date(s.timestamp || s.date || 0);
+        return d >= startOfWeek && d <= endOfToday;
+      });
+    }
+
+    if (timeFilter === 'month') {
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+      return salaryAdvances.filter(s => {
+        const d = s.timestamp?.toDate ? s.timestamp.toDate() : new Date(s.timestamp || s.date || 0);
+        return d >= startOfMonth && d <= endOfToday;
+      });
+    }
+
+    return salaryAdvances;
+  }, [salaryAdvances, timeFilter]);
+
   // Aggregate Metrics Computed from Filtered Sales
   const metrics = useMemo(() => {
     let revenue = 0;
@@ -273,6 +387,7 @@ export default function OwnerDashboardScreen({ navigation }) {
     let petrolRev = 0;
     let dieselLiters = 0;
     let dieselRev = 0;
+    let mobilSales = 0;
     let cash = 0;
     let online = 0;
     let cards = 0;
@@ -280,6 +395,11 @@ export default function OwnerDashboardScreen({ navigation }) {
     let udhari = 0;
     let expenses = 0;
     let shortageExcess = 0;
+    let paytmTotal = 0;
+    let phonePeTotal = 0;
+    let bobBankTotal = 0;
+    let atmTotal = 0;
+    let bharatPeTotal = 0;
 
     filteredSales.forEach(s => {
       const payment = Number(s.totalPayment) || 0;
@@ -296,28 +416,55 @@ export default function OwnerDashboardScreen({ navigation }) {
       petrolRev += pExp;
       dieselLiters += dLiters;
       dieselRev += dExp;
+      mobilSales += Number(s.totalMobilAmount) || 0;
 
       cash += Number(s.cashAmount) || 0;
       
-      // Online / UPI
-      const upiAmt = (Number(s.onlineAmount) || 0) + 
-                     (Number(s.phonePeAmount) || 0) + 
-                     (Number(s.paytmAmount) || 0) + 
-                     (Number(s.bharatPeAmount) || 0);
-      online += upiAmt;
+      // Multi-Mode Digital Payments extraction
+      let curPaytm = Number(s.paytmAmount) || 0;
+      let curPhonePe = Number(s.phonePeAmount) || 0;
+      let curBob = Number(s.bobAmount) || 0;
+      let curAtm = (Number(s.atmAmount) || 0) + (Number(s.debitCardAmount) || 0) + (Number(s.creditCardAmount) || 0);
+      let curBharatPe = Number(s.bharatPeAmount) || 0;
+      let curFleet = (Number(s.extraPowerAmount) || 0) + 
+                     (Number(s.extraRewardAmount) || 0) +
+                     (Number(s.offerAmount) || 0) +
+                     (Number(s.customDigitalAmount) || 0);
 
-      // Card / POS
-      const cardAmt = (Number(s.atmAmount) || 0) + 
-                      (Number(s.debitCardAmount) || 0) + 
-                      (Number(s.creditCardAmount) || 0);
-      cards += cardAmt;
+      const dList = Array.isArray(s.digitalPaymentsBreakdown) && s.digitalPaymentsBreakdown.length > 0
+        ? s.digitalPaymentsBreakdown
+        : (Array.isArray(s.digitalEntries) ? s.digitalEntries : []);
 
-      // Fleet
-      const fleetAmt = (Number(s.extraPowerAmount) || 0) + 
-                       (Number(s.extraRewardAmount) || 0) +
-                       (Number(s.offerAmount) || 0) +
-                       (Number(s.customDigitalAmount) || 0);
-      fleet += fleetAmt;
+      dList.forEach(d => {
+        const id = (d.id || d.modeId || '').toLowerCase();
+        const name = (d.name || '').toLowerCase();
+        const amt = parseFloat(d.amount) || 0;
+        if (amt > 0) {
+          if (id.includes('bob') || name.includes('bob') || name.includes('baroda')) {
+            curBob = Math.max(curBob, amt);
+          } else if (id.includes('paytm') || name.includes('paytm')) {
+            curPaytm = Math.max(curPaytm, amt);
+          } else if (id.includes('phone') || name.includes('phone')) {
+            curPhonePe = Math.max(curPhonePe, amt);
+          } else if (id.includes('atm') || id.includes('pos') || name.includes('atm') || name.includes('pos') || name.includes('card')) {
+            curAtm = Math.max(curAtm, amt);
+          } else if (id.includes('bharat') || name.includes('bharat')) {
+            curBharatPe = Math.max(curBharatPe, amt);
+          }
+        }
+      });
+
+      paytmTotal += curPaytm;
+      phonePeTotal += curPhonePe;
+      bobBankTotal += curBob;
+      atmTotal += curAtm;
+      bharatPeTotal += curBharatPe;
+
+      // Online / UPI / Digital
+      const explicitOnline = Number(s.onlineAmount) || 0;
+      online += explicitOnline > 0 ? explicitOnline : (curPaytm + curPhonePe + curBharatPe + curBob);
+      cards += curAtm;
+      fleet += curFleet;
 
       udhari += Number(s.udhariAmount) || 0;
       expenses += Number(s.expenses) || 0;
@@ -325,6 +472,16 @@ export default function OwnerDashboardScreen({ navigation }) {
 
       if (!s.isSettled) {
         pending += payment;
+      }
+    });
+
+    // Also include direct/support staff salary advances (Chaukidaar, Sweeper, Salesman) not already inside shift reports
+    filteredSalaryAdvances.forEach(adv => {
+      const amt = Number(adv.amount || 0);
+      if (amt <= 0) return;
+      const alreadyCaptured = adv.reportId && filteredSales.some(s => s.id === adv.reportId);
+      if (!alreadyCaptured) {
+        expenses += amt;
       }
     });
 
@@ -337,16 +494,442 @@ export default function OwnerDashboardScreen({ navigation }) {
       petrolRev,
       dieselLiters,
       dieselRev,
+      mobilSales,
       cash,
       online,
       cards,
       fleet,
+      paytm: paytmTotal,
+      phonePe: phonePeTotal,
+      bobBank: bobBankTotal,
+      atm: atmTotal,
+      bharatPe: bharatPeTotal,
       totalDigital: online + cards + fleet,
       udhari,
       expenses,
       shortageExcess
     };
-  }, [filteredSales]);
+  }, [filteredSales, filteredSalaryAdvances]);
+
+  // Formatter for card drilldown dates
+  const formatDocDate = (ts) => {
+    if (!ts) return 'N/A';
+    const d = ts.toDate ? ts.toDate() : new Date(ts);
+    if (isNaN(d.getTime())) return 'N/A';
+    return d.toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+  };
+
+  // Handler to open drilldown modal for any tapped card
+  const handleOpenCardDetail = (type) => {
+    let title = '';
+    let subtitle = '';
+    let icon = 'wallet-outline';
+    let color = '#003C8F';
+    let items = [];
+    let totalVal = '';
+    let totalLabel = 'Total';
+
+    const periodLabel = timeFilter === 'today' ? "Today" : timeFilter === 'yesterday' ? "Yesterday" : timeFilter === 'week' ? "Last 7 Days" : "This Month";
+
+    if (type === 'cash') {
+      title = '💵 Cash Collection (कैश वसूली)';
+      icon = 'cash-outline';
+      color = '#16A34A';
+      totalLabel = 'Total Cash';
+      totalVal = `₹${metrics.cash.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        const amt = Number(s.cashAmount) || 0;
+        if (amt > 0) {
+          const pTest = Number(s.petrolTesting) || 0;
+          const dTest = Number(s.dieselTesting) || 0;
+          const shiftNum = (pTest > 0 || dTest > 0) ? 1 : 2;
+          const notes = s.cashNotesAmount || (s.coinsAmount ? (amt - s.coinsAmount) : null);
+          const coins = s.coinsAmount || null;
+          const noteStr = (notes || coins) ? `Notes: ₹${notes || 0} • Coins: ₹${coins || 0}` : null;
+          items.push({
+            id: `${s.id}_cash`,
+            title: salesmenMap[s.salesmanId] || s.salesmanName || 'Staff',
+            subtitle: `${s.machineName || s.machineId || 'Machine'} (Shift ${shiftNum})`,
+            date: formatDocDate(s.timestamp),
+            amountText: `₹${amt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#16A34A',
+            badge: `Shift ${shiftNum}`,
+            details: noteStr
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Shifts Recorded`;
+    } else if (type === 'bobBank') {
+      title = '🏦 BOB Bank (बैंक ऑफ बड़ौदा)';
+      icon = 'business-outline';
+      color = '#EA580C';
+      totalLabel = 'Total BOB Bank';
+      totalVal = `₹${metrics.bobBank.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        let amt = Number(s.bobAmount) || 0;
+        const dList = s.digitalPaymentsBreakdown || s.digitalEntries || [];
+        dList.forEach(d => {
+          const id = (d.id || d.modeId || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          if (id.includes('bob') || name.includes('bob') || name.includes('baroda')) {
+            amt = Math.max(amt, parseFloat(d.amount) || 0);
+          }
+        });
+        if (amt > 0) {
+          items.push({
+            id: `${s.id}_bob`,
+            title: salesmenMap[s.salesmanId] || s.salesmanName || 'Staff',
+            subtitle: `${s.machineName || s.machineId || 'Machine'} • Direct BOB QR / NetBanking`,
+            date: formatDocDate(s.timestamp),
+            amountText: `₹${amt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#EA580C',
+            badge: 'BOB Bank'
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Deposits Recorded`;
+    } else if (type === 'paytm') {
+      title = '📱 Paytm UPI Transactions';
+      icon = 'wallet-outline';
+      color = '#00B9F5';
+      totalLabel = 'Total Paytm';
+      totalVal = `₹${metrics.paytm.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        let amt = Number(s.paytmAmount) || 0;
+        const dList = s.digitalPaymentsBreakdown || s.digitalEntries || [];
+        dList.forEach(d => {
+          const id = (d.id || d.modeId || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          if (id.includes('paytm') || name.includes('paytm')) {
+            amt = Math.max(amt, parseFloat(d.amount) || 0);
+          }
+        });
+        if (amt > 0) {
+          items.push({
+            id: `${s.id}_paytm`,
+            title: salesmenMap[s.salesmanId] || s.salesmanName || 'Staff',
+            subtitle: `${s.machineName || s.machineId || 'Machine'} • Paytm QR / Soundbox`,
+            date: formatDocDate(s.timestamp),
+            amountText: `₹${amt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#00B9F5',
+            badge: 'Paytm'
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Collections Recorded`;
+    } else if (type === 'phonepe') {
+      title = '📱 PhonePe UPI Transactions';
+      icon = 'phone-portrait-outline';
+      color = '#5F259F';
+      totalLabel = 'Total PhonePe';
+      totalVal = `₹${metrics.phonePe.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        let amt = Number(s.phonePeAmount) || 0;
+        const dList = s.digitalPaymentsBreakdown || s.digitalEntries || [];
+        dList.forEach(d => {
+          const id = (d.id || d.modeId || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          if (id.includes('phone') || name.includes('phone')) {
+            amt = Math.max(amt, parseFloat(d.amount) || 0);
+          }
+        });
+        if (amt > 0) {
+          items.push({
+            id: `${s.id}_phonepe`,
+            title: salesmenMap[s.salesmanId] || s.salesmanName || 'Staff',
+            subtitle: `${s.machineName || s.machineId || 'Machine'} • PhonePe Smart QR`,
+            date: formatDocDate(s.timestamp),
+            amountText: `₹${amt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#5F259F',
+            badge: 'PhonePe'
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Collections Recorded`;
+    } else if (type === 'cards' || type === 'atm') {
+      title = '💳 ATM / POS Card Swipes';
+      icon = 'card-outline';
+      color = '#0284C7';
+      totalLabel = 'Total POS / Cards';
+      totalVal = `₹${metrics.atm.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        let amt = (Number(s.atmAmount) || 0) + (Number(s.debitCardAmount) || 0) + (Number(s.creditCardAmount) || 0);
+        const dList = s.digitalPaymentsBreakdown || s.digitalEntries || [];
+        dList.forEach(d => {
+          const id = (d.id || d.modeId || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          if (id.includes('atm') || id.includes('pos') || name.includes('atm') || name.includes('pos') || name.includes('card')) {
+            amt = Math.max(amt, parseFloat(d.amount) || 0);
+          }
+        });
+        if (amt > 0) {
+          items.push({
+            id: `${s.id}_cards`,
+            title: salesmenMap[s.salesmanId] || s.salesmanName || 'Staff',
+            subtitle: `${s.machineName || s.machineId || 'Machine'} • POS Swipe Terminal`,
+            date: formatDocDate(s.timestamp),
+            amountText: `₹${amt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#0284C7',
+            badge: 'POS Swipe'
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Swipes Recorded`;
+    } else if (type === 'udhari') {
+      title = '📒 Customer Udhari (Khata) Slips';
+      icon = 'book-outline';
+      color = '#D97706';
+      totalLabel = 'Total Udhari';
+      totalVal = `₹${metrics.udhari.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        const staff = salesmenMap[s.salesmanId] || s.salesmanName || 'Staff';
+        const dStr = formatDocDate(s.timestamp);
+        if (Array.isArray(s.udhariBreakdown)) {
+          s.udhariBreakdown.forEach((u, uIdx) => {
+            const uAmt = parseFloat(u.amount) || 0;
+            if (uAmt > 0) {
+              items.push({
+                id: `${s.id}_u_${uIdx}`,
+                title: u.name || 'Customer Account',
+                subtitle: `Issued by: ${staff} (${s.machineName || 'DU'})`,
+                date: dStr,
+                amountText: `₹${uAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+                amountColor: '#D97706',
+                badge: 'उधारी'
+              });
+            }
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Slips Recorded`;
+    } else if (type === 'expenses') {
+      title = '🧾 Pump Operating Expenses & Salary';
+      icon = 'receipt-outline';
+      color = '#DC2626';
+      totalLabel = 'Total Expenses';
+      totalVal = `₹${metrics.expenses.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        const staff = salesmenMap[s.salesmanId] || s.salesmanName || 'Staff';
+        const dStr = formatDocDate(s.timestamp);
+        if (Array.isArray(s.expenseBreakdown)) {
+          s.expenseBreakdown.forEach((e, eIdx) => {
+            const eAmt = parseFloat(e.amount) || 0;
+            if (eAmt > 0) {
+              const isSalary = (e.type === 'salary' || (e.reason || '').toLowerCase().includes('salary') || (e.reason || '').toLowerCase().includes('advance'));
+              items.push({
+                id: `${s.id}_e_${eIdx}`,
+                title: isSalary ? `💼 वेतन / एडवांस (${e.salesmanName || staff})` : (e.reason || 'Pump Expense'),
+                subtitle: `Reported by: ${staff} (${s.machineName || 'DU'})`,
+                date: dStr,
+                amountText: `₹${eAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+                amountColor: '#DC2626',
+                badge: isSalary ? 'Salary' : 'Expense'
+              });
+            }
+          });
+        }
+      });
+
+      // Also append standalone/support staff advances (Chaukidaar, Sweeper, etc.)
+      filteredSalaryAdvances.forEach(adv => {
+        const amt = parseFloat(adv.amount) || 0;
+        if (amt <= 0) return;
+        const alreadyCaptured = adv.reportId && filteredSales.some(s => s.id === adv.reportId);
+        if (!alreadyCaptured) {
+          const staffName = adv.salesmanName || salesmenMap[adv.salesmanId] || 'Staff';
+          const dStr = formatDocDate(adv.timestamp || adv.date);
+          const roleBadge = adv.staffType === 'watchman' ? '🛡️ चौकीदार' : (adv.staffType === 'sweeper' ? '🧹 सफाईकर्मी' : '💼 स्टाफ वेतन/एडवांस');
+          items.push({
+            id: adv.id || `adv_${Math.random()}`,
+            title: `${roleBadge} (${staffName})`,
+            subtitle: `${adv.notes || 'वेतन / मजदूरी भुगतान'} • ${adv.paymentMode || 'Cash'}`,
+            date: dStr,
+            amountText: `₹${amt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#DC2626',
+            badge: adv.staffType === 'watchman' ? 'चौकीदार' : adv.staffType === 'sweeper' ? 'सफाईकर्मी' : 'Salary'
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Vouchers Recorded`;
+    } else if (type === 'petrol') {
+      title = '⛽ Petrol (MS) Sales Breakdown';
+      icon = 'flame-outline';
+      color = '#FF6F00';
+      totalLabel = 'Total Petrol';
+      totalVal = `${metrics.petrolLiters.toFixed(2)} L (₹${metrics.petrolRev.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
+      filteredSales.forEach(s => {
+        const qty = Number(s.petrolQuantitySold) || 0;
+        if (qty > 0) {
+          const rate = Number(s.petrolRate) || 0;
+          const amt = Number(s.petrolExpectedAmount) || (qty * rate);
+          const staff = salesmenMap[s.salesmanId] || s.salesmanName || 'Staff';
+          const test = Number(s.petrolTesting) || 0;
+          const pOff = Number(s.petrolOfficialTesting) || 0;
+          items.push({
+            id: `${s.id}_p`,
+            title: `${staff} • ${s.machineName || 'Dispenser'}`,
+            subtitle: `Meters: ${s.petrolOpeningMeter || '0'} → ${s.petrolClosingMeter || '0'}${test > 0 ? ` (Test: ${test}L${pOff > 0 ? ` • Off: ${pOff}L` : ''})` : ''}`,
+            date: formatDocDate(s.timestamp),
+            amountText: `${qty.toFixed(2)} L`,
+            amountSubText: `₹${amt.toFixed(2)}`,
+            amountColor: '#FF6F00',
+            badge: `₹${rate.toFixed(2)}/L`
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Shifts Recorded`;
+    } else if (type === 'diesel') {
+      title = '🛢️ Diesel (HSD) Sales Breakdown';
+      icon = 'water-outline';
+      color = '#003C8F';
+      totalLabel = 'Total Diesel';
+      totalVal = `${metrics.dieselLiters.toFixed(2)} L (₹${metrics.dieselRev.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`;
+      filteredSales.forEach(s => {
+        const qty = Number(s.dieselQuantitySold) || 0;
+        if (qty > 0) {
+          const rate = Number(s.dieselRate) || 0;
+          const amt = Number(s.dieselExpectedAmount) || (qty * rate);
+          const staff = salesmenMap[s.salesmanId] || s.salesmanName || 'Staff';
+          const test = Number(s.dieselTesting) || 0;
+          const dOff = Number(s.dieselOfficialTesting) || 0;
+          items.push({
+            id: `${s.id}_d`,
+            title: `${staff} • ${s.machineName || 'Dispenser'}`,
+            subtitle: `Meters: ${s.dieselOpeningMeter || '0'} → ${s.dieselClosingMeter || '0'}${test > 0 ? ` (Test: ${test}L${dOff > 0 ? ` • Off: ${dOff}L` : ''})` : ''}`,
+            date: formatDocDate(s.timestamp),
+            amountText: `${qty.toFixed(2)} L`,
+            amountSubText: `₹${amt.toFixed(2)}`,
+            amountColor: '#003C8F',
+            badge: `₹${rate.toFixed(2)}/L`
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Shifts Recorded`;
+    } else if (type === 'revenue' || type === 'totalSales') {
+      title = '💰 Total Sales Revenue Reconcile';
+      icon = 'cash-outline';
+      color = '#003C8F';
+      totalLabel = 'Total Revenue';
+      totalVal = `₹${metrics.revenue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        const staff = salesmenMap[s.salesmanId] || s.salesmanName || 'Staff';
+        const exp = Number(s.expectedTotalAmount) || Number(s.totalPayment) || 0;
+        const col = Number(s.totalPayment) || 0;
+        const diff = col - exp;
+        const diffStr = Math.abs(diff) < 1 ? 'Balanced (₹0)' : (diff < 0 ? `Shortage: -₹${Math.abs(diff).toFixed(0)}` : `Excess: +₹${diff.toFixed(0)}`);
+        const pTest = Number(s.petrolTesting) || 0;
+        const dTest = Number(s.dieselTesting) || 0;
+        const shiftNum = (pTest > 0 || dTest > 0) ? 1 : 2;
+        items.push({
+          id: `${s.id}_rev`,
+          title: `${staff} • ${s.machineName || 'Dispenser'}`,
+          subtitle: `Expected: ₹${exp.toFixed(0)} • Collected: ₹${col.toFixed(0)} (${diffStr})`,
+          date: formatDocDate(s.timestamp),
+          amountText: `₹${col.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          amountColor: '#003C8F',
+          badge: `Shift ${shiftNum}`
+        });
+      });
+      subtitle = `${periodLabel} • ${items.length} Shifts Recorded`;
+    } else if (type === 'totalFuel') {
+      title = '⛽ Fuel Dispensed (MS & HSD)';
+      icon = 'speedometer-outline';
+      color = '#0F766E';
+      totalLabel = 'Fuel Volume';
+      totalVal = `MS: ${metrics.petrolLiters.toFixed(2)} L • HSD: ${metrics.dieselLiters.toFixed(2)} L`;
+      filteredSales.forEach(s => {
+        const pQty = Number(s.petrolQuantitySold) || 0;
+        const dQty = Number(s.dieselQuantitySold) || 0;
+        const pTest = Number(s.petrolTesting) || 0;
+        const dTest = Number(s.dieselTesting) || 0;
+        const shiftNum = (pTest > 0 || dTest > 0) ? 1 : 2;
+        const staff = salesmenMap[s.salesmanId] || s.salesmanName || 'Staff';
+        items.push({
+          id: `${s.id}_tot`,
+          title: `${staff} • ${s.machineName || 'Dispenser'}`,
+          subtitle: `Petrol: ${pQty.toFixed(2)}L • Diesel: ${dQty.toFixed(2)}L`,
+          date: formatDocDate(s.timestamp),
+          amountText: `MS: ${pQty.toFixed(2)}L | HSD: ${dQty.toFixed(2)}L`,
+          amountColor: '#0F766E',
+          badge: `Shift ${shiftNum}`
+        });
+      });
+      subtitle = `${periodLabel} • ${items.length} Shifts Recorded`;
+    } else if (type === 'mobil') {
+      title = '🛢️ मोबिल बिक्री (Mobil / Lubricants)';
+      icon = 'color-palette-outline';
+      color = '#7C3AED';
+      totalLabel = 'Total Mobil Sales';
+      totalVal = `₹${metrics.mobilSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        const staff = salesmenMap[s.salesmanId] || s.salesmanName || 'Staff';
+        const dStr = formatDocDate(s.timestamp);
+        if (Array.isArray(s.mobilEntries) && s.mobilEntries.length > 0) {
+          s.mobilEntries.forEach((m, mIdx) => {
+            const mAmt = parseFloat(m.amount) || 0;
+            items.push({
+              id: `${s.id}_m_${mIdx}`,
+              title: `${m.packSize || 'मोबिल'} (${m.quantity || 1} Pcs)`,
+              subtitle: `Sold by: ${staff} (${s.machineName || 'DU'})`,
+              date: dStr,
+              amountText: `₹${mAmt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+              amountColor: '#7C3AED',
+              badge: 'Mobil'
+            });
+          });
+        } else if (Number(s.totalMobilAmount) > 0) {
+          items.push({
+            id: `${s.id}_m_tot`,
+            title: `मोबिल बिक्री (${s.totalMobilQty || 1} Pcs)`,
+            subtitle: `Sold by: ${staff} (${s.machineName || 'DU'})`,
+            date: dStr,
+            amountText: `₹${Number(s.totalMobilAmount).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#7C3AED',
+            badge: 'Mobil'
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Sales Recorded`;
+    } else if (type === 'fleet') {
+      title = '⛽ Fleet / ExtraPower / ExtraRewards';
+      icon = 'flame-outline';
+      color = '#EA580C';
+      totalLabel = 'Total Fleet / Rewards';
+      totalVal = `₹${metrics.fleet.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      filteredSales.forEach(s => {
+        const amt = (Number(s.extraPowerAmount) || 0) + (Number(s.extraRewardAmount) || 0) + (Number(s.offerAmount) || 0) + (Number(s.customDigitalAmount) || 0);
+        if (amt > 0) {
+          items.push({
+            id: `${s.id}_fleet`,
+            title: salesmenMap[s.salesmanId] || s.salesmanName || 'Staff',
+            subtitle: `${s.machineName || s.machineId || 'Machine'} • Fleet Card / Reward Points`,
+            date: formatDocDate(s.timestamp),
+            amountText: `₹${amt.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+            amountColor: '#EA580C',
+            badge: 'Fleet'
+          });
+        }
+      });
+      subtitle = `${periodLabel} • ${items.length} Transactions Recorded`;
+    }
+
+    setDrilldownModal({
+      visible: true,
+      title,
+      subtitle,
+      icon,
+      color,
+      items,
+      totalVal,
+      totalLabel
+    });
+  };
 
   // Distinct Months available for Salary Advance filtering
   const availableAdvanceMonths = useMemo(() => {
@@ -421,9 +1004,10 @@ export default function OwnerDashboardScreen({ navigation }) {
       tankId: 'Tank 1',
       tankName: 'Tank 1 (Petrol - MS)',
       fuelType: 'Petrol',
-      stock: t1FromDb?.petrolStock !== undefined ? t1FromDb.petrolStock : (t1FromDb?.stock !== undefined ? t1FromDb.stock : 0),
+      stock: Math.max(0, parseFloat(t1FromDb?.petrolStock !== undefined ? t1FromDb.petrolStock : (t1FromDb?.stock !== undefined ? t1FromDb.stock : 0)) || 0),
       capacity: t1FromDb?.petrolCapacity || t1FromDb?.capacity || 20000,
-      lastTestingReturned: t1FromDb?.lastTestingReturned || 5
+      lastTestingReturned: t1FromDb?.lastTestingReturned || 5,
+      dipReading: t1FromDb?.dipReading || null
     };
 
     const tank2 = {
@@ -431,13 +1015,70 @@ export default function OwnerDashboardScreen({ navigation }) {
       tankId: 'Tank 2',
       tankName: 'Tank 2 (Diesel - HSD)',
       fuelType: 'Diesel',
-      stock: t2FromDb?.dieselStock !== undefined ? t2FromDb.dieselStock : (t2FromDb?.stock !== undefined ? t2FromDb.stock : 0),
+      stock: Math.max(0, parseFloat(t2FromDb?.dieselStock !== undefined ? t2FromDb.dieselStock : (t2FromDb?.stock !== undefined ? t2FromDb.stock : 0)) || 0),
       capacity: t2FromDb?.dieselCapacity || t2FromDb?.capacity || 20000,
-      lastTestingReturned: t2FromDb?.lastTestingReturned || 5
+      lastTestingReturned: t2FromDb?.lastTestingReturned || 5,
+      dipReading: t2FromDb?.dipReading || null
     };
 
     return [tank1, tank2];
   }, [tanks]);
+
+  // Open Admin Stock Edit Modal
+  const handleOpenStockEdit = (targetTankId) => {
+    const t1 = effectiveTanks[0];
+    const t2 = effectiveTanks[1];
+    setEditTank1Liters(t1?.stock ? t1.stock.toFixed(0) : '0');
+    setEditTank1Dip(t1?.dipReading ? String(t1.dipReading).replace(/[^0-9.]/g, '') : '');
+    setEditTank2Liters(t2?.stock ? t2.stock.toFixed(0) : '0');
+    setEditTank2Dip(t2?.dipReading ? String(t2.dipReading).replace(/[^0-9.]/g, '') : '');
+    setShowStockEditModal(true);
+  };
+
+  // Save Admin Stock Edit
+  const handleSaveStockEdit = async () => {
+    const pVal = parseFloat(editTank1Liters);
+    const dVal = parseFloat(editTank2Liters);
+
+    if (isNaN(pVal) || pVal < 0 || isNaN(dVal) || dVal < 0) {
+      Toast.show({ 
+        type: 'error', 
+        text1: 'त्रुटि', 
+        text2: 'कृपया दोनों टैंकों का वैध स्टॉक (Liters) दर्ज करें।' 
+      });
+      return;
+    }
+
+    setSavingStockEdit(true);
+    try {
+      await updateTankStockManual({
+        tankId: 'Tank-1',
+        liters: pVal,
+        dipReading: editTank1Dip,
+        reason: 'Admin Dashboard Direct Stock Edit',
+        adjustedBy: 'Owner / Admin'
+      });
+
+      await updateTankStockManual({
+        tankId: 'Tank-2',
+        liters: dVal,
+        dipReading: editTank2Dip,
+        reason: 'Admin Dashboard Direct Stock Edit',
+        adjustedBy: 'Owner / Admin'
+      });
+
+      Toast.show({ 
+        type: 'success', 
+        text1: 'टैंक स्टॉक अपडेट हुआ ✅', 
+        text2: `Tank 1: ${pVal}L (${editTank1Dip || '-'} cm) | Tank 2: ${dVal}L (${editTank2Dip || '-'} cm)` 
+      });
+      setShowStockEditModal(false);
+    } catch (err) {
+      Toast.show({ type: 'error', text1: 'Error', text2: err.message });
+    } finally {
+      setSavingStockEdit(false);
+    }
+  };
 
   const renderTank = ({ item }) => (
     <View style={styles.tankWrapper}>
@@ -448,9 +1089,64 @@ export default function OwnerDashboardScreen({ navigation }) {
         stock={item.stock}
         capacity={item.capacity}
         lastTestingReturned={item.lastTestingReturned}
+        dipReading={item.dipReading}
+        onEdit={() => handleOpenStockEdit(item.id)}
       />
     </View>
   );
+
+  // Today's daily pump inspection photos count
+  const todayPhotosCount = useMemo(() => {
+    const todayStr = getLocalDateString();
+    return dailyPhotosList
+      .filter(item => {
+        if (!item) return false;
+        if (item.dateStr === todayStr) return true;
+        if (item.timestamp) {
+          const d = item.timestamp?.toDate ? item.timestamp.toDate() : new Date(item.timestamp);
+          if (!isNaN(d.getTime()) && getLocalDateString(d) === todayStr) return true;
+        }
+        return false;
+      })
+      .reduce((sum, item) => sum + (Array.isArray(item.imageUrls) ? item.imageUrls.length : 0), 0);
+  }, [dailyPhotosList]);
+
+  // Directly open fullscreen viewer with all daily pump photos
+  const handleViewDailyImagesDirect = () => {
+    const allImages = [];
+    const allTitles = [];
+
+    dailyPhotosList.forEach(item => {
+      const urls = Array.isArray(item.imageUrls) ? item.imageUrls : [];
+      const staff = item.staffName && item.staffName !== 'Aasish sir' && item.staffName !== 'Ashish sir' 
+        ? item.staffName 
+        : 'स्टाफ';
+      const dStr = formatDocDate(item.timestamp) || item.dateStr || 'Recent';
+      const noteStr = item.note ? ` • ${item.note}` : '';
+
+      urls.forEach(url => {
+        allImages.push(url);
+        allTitles.push(`📸 ${staff}${noteStr} (${dStr})`);
+      });
+    });
+
+    if (allImages.length === 0) {
+      Toast.show({
+        type: 'info',
+        text1: 'कोई तस्वीर नहीं मिली (No Photos)',
+        text2: 'स्टाफ द्वारा अभी तक कोई दैनिक तस्वीर अपलोड नहीं की गई है।'
+      });
+      return;
+    }
+
+    setFullscreenViewerData({
+      visible: true,
+      images: allImages,
+      titles: allTitles,
+      initialIndex: 0,
+      title: allTitles[0]
+    });
+  };
 
   return (
     <>
@@ -499,6 +1195,32 @@ export default function OwnerDashboardScreen({ navigation }) {
           ))}
         </View>
       )}
+
+      {/* 📸 View Daily Images Banner */}
+      <TouchableOpacity 
+        style={styles.dailyPhotosBannerCard}
+        activeOpacity={0.85}
+        onPress={() => setShowDailyPhotosModal(true)}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+          <View style={styles.dailyPhotosIconCircle}>
+            <Icon name="camera" size={22} color="#003C8F" />
+          </View>
+          <View style={{ marginLeft: 12, flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+              <Text style={styles.dailyPhotosBannerTitle}>Daily Images (पंप की तस्वीरें)</Text>
+              {todayPhotosCount > 0 ? (
+                <View style={styles.dailyPhotosCountBadge}>
+                  <Text style={styles.dailyPhotosCountBadgeText}>{todayPhotosCount} New</Text>
+                </View>
+              ) : null}
+            </View>
+          </View>
+        </View>
+        <View style={styles.dailyPhotosViewBtn}>
+          <Text style={styles.dailyPhotosViewBtnText}>देखें ›</Text>
+        </View>
+      </TouchableOpacity>
 
       {/* 2. Time Range Filter Pills */}
       <View style={styles.filterRow}>
@@ -553,7 +1275,11 @@ export default function OwnerDashboardScreen({ navigation }) {
         {/* Two Large Fuel Volume Cards */}
         <View style={styles.fuelVolumeGrid}>
           {/* Petrol Volume Card */}
-          <View style={[styles.fuelVolumeCard, { borderColor: '#FF6F00' }]}>
+          <TouchableOpacity 
+            activeOpacity={0.8}
+            onPress={() => handleOpenCardDetail('petrol')}
+            style={[styles.fuelVolumeCard, { borderColor: '#FF6F00' }]}
+          >
             <View style={styles.fuelCardTop}>
               <View style={[styles.fuelIconBadge, { backgroundColor: '#FFF3E0' }]}>
                 <Icon name="flame" size={20} color="#FF6F00" />
@@ -570,10 +1296,15 @@ export default function OwnerDashboardScreen({ navigation }) {
               <Text style={styles.fuelAmountLabel}>Amount:</Text>
               <Text style={styles.fuelAmountVal}>₹{metrics.petrolRev.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
             </View>
-          </View>
+            <Text style={styles.cardViewMoreHint}>विवरण देखें ›</Text>
+          </TouchableOpacity>
 
           {/* Diesel Volume Card */}
-          <View style={[styles.fuelVolumeCard, { borderColor: '#003C8F' }]}>
+          <TouchableOpacity 
+            activeOpacity={0.8}
+            onPress={() => handleOpenCardDetail('diesel')}
+            style={[styles.fuelVolumeCard, { borderColor: '#003C8F' }]}
+          >
             <View style={styles.fuelCardTop}>
               <View style={[styles.fuelIconBadge, { backgroundColor: '#E3F2FD' }]}>
                 <Icon name="water" size={20} color="#003C8F" />
@@ -590,23 +1321,37 @@ export default function OwnerDashboardScreen({ navigation }) {
               <Text style={styles.fuelAmountLabel}>Amount:</Text>
               <Text style={styles.fuelAmountVal}>₹{metrics.dieselRev.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
             </View>
-          </View>
+            <Text style={styles.cardViewMoreHint}>विवरण देखें ›</Text>
+          </TouchableOpacity>
         </View>
 
-        {/* Combined Total Volume Strip */}
-        <View style={styles.totalVolumeStrip}>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <Icon name="water-outline" size={20} color="#003C8F" style={{ marginRight: 6 }} />
-            <Text style={styles.totalVolumeLabel}>Total Fuel Dispensed:</Text>
-          </View>
-          <Text style={styles.totalVolumeVal}>{metrics.totalLiters.toFixed(2)} L</Text>
-        </View>
+        {/* Additional Mobil Sales Strip */}
+        {metrics.mobilSales > 0 && (
+          <TouchableOpacity 
+            activeOpacity={0.8}
+            onPress={() => handleOpenCardDetail('mobil')}
+            style={[styles.totalVolumeStrip, { backgroundColor: '#FAF5FF', borderColor: '#E9D5FF', marginTop: 8 }]}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Icon name="color-palette-outline" size={20} color="#7C3AED" style={{ marginRight: 6 }} />
+              <Text style={[styles.totalVolumeLabel, { color: '#5B21B6' }]}>मोबिल बिक्री (Mobil / Lubricants):</Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Text style={[styles.totalVolumeVal, { color: '#7C3AED' }]}>₹{metrics.mobilSales.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} </Text>
+              <Icon name="chevron-forward" size={14} color="#7C3AED" />
+            </View>
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* 4. Financial & Collection KPI Cards */}
       <View style={styles.metricsGrid}>
         {/* Total Sales */}
-        <View style={[styles.metricCard, { backgroundColor: '#003C8F' }]}>
+        <TouchableOpacity 
+          activeOpacity={0.8}
+          onPress={() => handleOpenCardDetail('revenue')}
+          style={[styles.metricCard, { backgroundColor: '#003C8F' }]}
+        >
           <View style={styles.metricHeader}>
             <Icon name="cash-outline" size={22} color="#fff" />
             <View style={styles.badgeMini}>
@@ -614,20 +1359,37 @@ export default function OwnerDashboardScreen({ navigation }) {
             </View>
           </View>
           <Text style={styles.metricValue}>₹{metrics.revenue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</Text>
-          <Text style={styles.metricLabel}>Total Sales (Revenue)</Text>
-        </View>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 }}>
+            <Text style={styles.metricLabel}>Total Sales (Revenue)</Text>
+            <Text style={{ color: '#93C5FD', fontSize: 10, fontWeight: '700' }}>विवरण देखें ›</Text>
+          </View>
+        </TouchableOpacity>
 
-        {/* Total Fuel Sold */}
-        <View style={[styles.metricCard, { backgroundColor: '#0F766E' }]}>
+        {/* Separate Petrol & Diesel Volume Card */}
+        <TouchableOpacity 
+          activeOpacity={0.8}
+          onPress={() => handleOpenCardDetail('totalFuel')}
+          style={[styles.metricCard, { backgroundColor: '#0F766E' }]}
+        >
           <View style={styles.metricHeader}>
             <Icon name="speedometer-outline" size={22} color="#fff" />
             <View style={styles.badgeMini}>
-              <Text style={styles.badgeMiniText}>Fuel Volume</Text>
+              <Text style={styles.badgeMiniText}>Volume (L)</Text>
             </View>
           </View>
-          <Text style={styles.metricValue}>{metrics.totalLiters.toFixed(2)} L</Text>
-          <Text style={styles.metricLabel}>Total Fuel Sold</Text>
-        </View>
+          <View style={{ marginVertical: 2 }}>
+            <Text style={{ color: '#FED7AA', fontSize: 12, fontWeight: '800' }}>
+              MS: <Text style={{ color: '#fff', fontSize: 13, fontWeight: '900' }}>{metrics.petrolLiters.toFixed(2)} L</Text>
+            </Text>
+            <Text style={{ color: '#BAE6FD', fontSize: 12, fontWeight: '800', marginTop: 1 }}>
+              HSD: <Text style={{ color: '#fff', fontSize: 13, fontWeight: '900' }}>{metrics.dieselLiters.toFixed(2)} L</Text>
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 }}>
+            <Text style={styles.metricLabel}>Petrol & Diesel Sold</Text>
+            <Text style={{ color: '#99F6E4', fontSize: 10, fontWeight: '700' }}>विवरण देखें ›</Text>
+          </View>
+        </TouchableOpacity>
       </View>
 
       {/* 5. Payment Modes Breakdown Card */}
@@ -642,47 +1404,143 @@ export default function OwnerDashboardScreen({ navigation }) {
 
         <View style={styles.paymentBreakdownGrid}>
           {/* Cash */}
-          <View style={[styles.paymentBox, { borderLeftColor: '#16A34A' }]}>
-            <Text style={styles.paymentBoxLabel}>💵 Cash</Text>
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('cash')}
+            style={[styles.paymentBox, { borderLeftColor: '#16A34A' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.paymentBoxLabel}>💵 Cash</Text>
+              <Icon name="chevron-forward" size={12} color="#94A3B8" />
+            </View>
             <Text style={[styles.paymentBoxVal, { color: '#16A34A' }]}>₹{metrics.cash.toFixed(2)}</Text>
-          </View>
+            <Text style={styles.paymentBoxTapHint}>विवरण देखें ›</Text>
+          </TouchableOpacity>
 
-          {/* Online / UPI */}
-          <View style={[styles.paymentBox, { borderLeftColor: '#7C3AED' }]}>
-            <Text style={styles.paymentBoxLabel}>📱 UPI (PhonePe / Paytm)</Text>
-            <Text style={[styles.paymentBoxVal, { color: '#7C3AED' }]}>₹{metrics.online.toFixed(2)}</Text>
-          </View>
+          {/* PhonePe */}
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('phonepe')}
+            style={[styles.paymentBox, { borderLeftColor: '#5F259F' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.paymentBoxLabel}>📱 PhonePe UPI</Text>
+              <Icon name="chevron-forward" size={12} color="#94A3B8" />
+            </View>
+            <Text style={[styles.paymentBoxVal, { color: '#5F259F' }]}>₹{metrics.phonePe.toFixed(2)}</Text>
+            <Text style={styles.paymentBoxTapHint}>विवरण देखें ›</Text>
+          </TouchableOpacity>
+
+          {/* Paytm */}
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('paytm')}
+            style={[styles.paymentBox, { borderLeftColor: '#00B9F5' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.paymentBoxLabel}>📱 Paytm UPI</Text>
+              <Icon name="chevron-forward" size={12} color="#94A3B8" />
+            </View>
+            <Text style={[styles.paymentBoxVal, { color: '#00B9F5' }]}>₹{metrics.paytm.toFixed(2)}</Text>
+            <Text style={styles.paymentBoxTapHint}>विवरण देखें ›</Text>
+          </TouchableOpacity>
+
+          {/* BOB Bank */}
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('bobBank')}
+            style={[styles.paymentBox, { borderLeftColor: '#EA580C' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={[styles.paymentBoxLabel, { color: '#EA580C', fontWeight: 'bold' }]}>🏦 BOB Bank</Text>
+              <Icon name="chevron-forward" size={12} color="#EA580C" />
+            </View>
+            <Text style={[styles.paymentBoxVal, { color: '#EA580C' }]}>₹{metrics.bobBank.toFixed(2)}</Text>
+            <Text style={[styles.paymentBoxTapHint, { color: '#EA580C' }]}>बैंक ऑफ बड़ौदा ›</Text>
+          </TouchableOpacity>
 
           {/* Cards / POS */}
-          <View style={[styles.paymentBox, { borderLeftColor: '#0284C7' }]}>
-            <Text style={styles.paymentBoxLabel}>💳 Cards / POS Swipe</Text>
-            <Text style={[styles.paymentBoxVal, { color: '#0284C7' }]}>₹{metrics.cards.toFixed(2)}</Text>
-          </View>
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('cards')}
+            style={[styles.paymentBox, { borderLeftColor: '#0284C7' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.paymentBoxLabel}>💳 ATM / POS Swipe</Text>
+              <Icon name="chevron-forward" size={12} color="#94A3B8" />
+            </View>
+            <Text style={[styles.paymentBoxVal, { color: '#0284C7' }]}>₹{metrics.atm.toFixed(2)}</Text>
+            <Text style={styles.paymentBoxTapHint}>कार्ड मशीन ›</Text>
+          </TouchableOpacity>
 
           {/* Fleet / Rewards */}
-          <View style={[styles.paymentBox, { borderLeftColor: '#EA580C' }]}>
-            <Text style={styles.paymentBoxLabel}>⛽ Fleet / ExtraPower</Text>
-            <Text style={[styles.paymentBoxVal, { color: '#EA580C' }]}>₹{metrics.fleet.toFixed(2)}</Text>
-          </View>
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('fleet')}
+            style={[styles.paymentBox, { borderLeftColor: '#F59E0B' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.paymentBoxLabel}>⛽ Fleet / Rewards</Text>
+              <Icon name="chevron-forward" size={12} color="#94A3B8" />
+            </View>
+            <Text style={[styles.paymentBoxVal, { color: '#D97706' }]}>₹{metrics.fleet.toFixed(2)}</Text>
+            <Text style={styles.paymentBoxTapHint}>विवरण देखें ›</Text>
+          </TouchableOpacity>
 
           {/* Credit / Udhari */}
-          <View style={[styles.paymentBox, { borderLeftColor: '#D97706' }]}>
-            <Text style={styles.paymentBoxLabel}>📒 Credit (Udhari)</Text>
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('udhari')}
+            style={[styles.paymentBox, { borderLeftColor: '#D97706' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.paymentBoxLabel}>📒 Credit (Udhari)</Text>
+              <Icon name="chevron-forward" size={12} color="#94A3B8" />
+            </View>
             <Text style={[styles.paymentBoxVal, { color: '#D97706' }]}>₹{metrics.udhari.toFixed(2)}</Text>
-          </View>
+            <Text style={styles.paymentBoxTapHint}>उधारी पर्ची ›</Text>
+          </TouchableOpacity>
 
           {/* Expenses */}
-          <View style={[styles.paymentBox, { borderLeftColor: '#DC2626' }]}>
-            <Text style={styles.paymentBoxLabel}>🧾 Expenses</Text>
+          <TouchableOpacity 
+            activeOpacity={0.7}
+            onPress={() => handleOpenCardDetail('expenses')}
+            style={[styles.paymentBox, { borderLeftColor: '#DC2626' }]}
+          >
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+              <Text style={styles.paymentBoxLabel}>🧾 Expenses</Text>
+              <Icon name="chevron-forward" size={12} color="#94A3B8" />
+            </View>
             <Text style={[styles.paymentBoxVal, { color: '#DC2626' }]}>₹{metrics.expenses.toFixed(2)}</Text>
-          </View>
+            <Text style={styles.paymentBoxTapHint}>खर्चे / वाउचर ›</Text>
+          </TouchableOpacity>
+
+          {/* Mobil Sales (if any) */}
+          {metrics.mobilSales > 0 && (
+            <TouchableOpacity 
+              activeOpacity={0.7}
+              onPress={() => handleOpenCardDetail('mobil')}
+              style={[styles.paymentBox, { borderLeftColor: '#7C3AED', width: '100%' }]}
+            >
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Text style={[styles.paymentBoxLabel, { color: '#7C3AED', fontWeight: 'bold' }]}>🛢️ मोबिल बिक्री (Mobil / Lubricants)</Text>
+                <Icon name="chevron-forward" size={12} color="#7C3AED" />
+              </View>
+              <Text style={[styles.paymentBoxVal, { color: '#7C3AED' }]}>₹{metrics.mobilSales.toFixed(2)}</Text>
+              <Text style={styles.paymentBoxTapHint}>मोबिल बिक्री विवरण देखें ›</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Shortage or Excess Notice */}
-        <View style={[
-          styles.shortageRow, 
-          { backgroundColor: metrics.shortageExcess < 0 ? '#FEF2F2' : '#F0FDF4' }
-        ]}>
+        <TouchableOpacity 
+          activeOpacity={0.8}
+          onPress={() => handleOpenCardDetail('revenue')}
+          style={[
+            styles.shortageRow, 
+            { backgroundColor: metrics.shortageExcess < 0 ? '#FEF2F2' : '#F0FDF4' }
+          ]}
+        >
           <Icon 
             name={metrics.shortageExcess < 0 ? "alert-circle" : "checkmark-circle"} 
             size={18} 
@@ -690,14 +1548,17 @@ export default function OwnerDashboardScreen({ navigation }) {
           />
           <Text style={[
             styles.shortageText, 
-            { color: metrics.shortageExcess < 0 ? "#DC2626" : "#16A34A" }
+            { color: metrics.shortageExcess < 0 ? "#DC2626" : "#16A34A", flex: 1 }
           ]}>
             {metrics.shortageExcess < 0 
               ? `Total Shortage: -₹${Math.abs(metrics.shortageExcess).toFixed(2)}` 
               : `Total Excess: +₹${metrics.shortageExcess.toFixed(2)}`
             }
           </Text>
-        </View>
+          <Text style={{ fontSize: 11, color: metrics.shortageExcess < 0 ? "#DC2626" : "#16A34A", fontWeight: '700' }}>
+            विवरण ›
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {/* 6. Live Tank Stock (Tank 1: Petrol • Tank 2: Diesel) */}
@@ -706,6 +1567,15 @@ export default function OwnerDashboardScreen({ navigation }) {
           <Icon name="speedometer-outline" size={22} color="#003C8F" style={{ marginRight: 8 }} />
           <Text style={styles.sectionMainTitle}>Live Tank Inventory</Text>
         </View>
+
+        <TouchableOpacity 
+          style={styles.stockEditHeaderBtn}
+          onPress={() => handleOpenStockEdit()}
+          activeOpacity={0.8}
+        >
+          <Icon name="create-outline" size={15} color="#003C8F" style={{ marginRight: 4 }} />
+          <Text style={styles.stockEditHeaderBtnText}>Stock Edit / सुधार</Text>
+        </TouchableOpacity>
       </View>
 
       <FlatList 
@@ -726,7 +1596,14 @@ export default function OwnerDashboardScreen({ navigation }) {
           </View>
         </View>
 
-        {effectiveMachines.map((m, idx) => {
+        {effectiveMachines.length === 0 ? (
+          <View style={{ paddingVertical: 18, alignItems: 'center' }}>
+            <Text style={{ color: '#64748B', fontSize: 13, fontStyle: 'italic' }}>
+              No dispenser machines configured yet. Add machines in Settings.
+            </Text>
+          </View>
+        ) : (
+          effectiveMachines.map((m, idx) => {
           const match = String(m.name || m.id || '').match(/\d+/);
           const num = match ? parseInt(match[0], 10) : (idx + 1);
           const pNz = m.petrolNozzle || `N${(num - 1) * 2 + 1}`;
@@ -780,7 +1657,7 @@ export default function OwnerDashboardScreen({ navigation }) {
                       🟢 Live Meter Reading:
                     </Text>
                     <Text style={{ fontSize: 11, color: '#334155', fontWeight: '600', marginLeft: 4 }}>
-                      अंतिम क्लोजिंग ({latestSale.shiftLabel || ('Shift ' + (latestSale.shiftNumber || 1))}) • {staffName}
+                      अंतिम क्लोजिंग (Shift {(Number(latestSale.petrolTesting) > 0 || Number(latestSale.dieselTesting) > 0) ? '1 (Testing)' : '2 (No-Test)'}) • {staffName}
                     </Text>
                   </View>
                 ) : (
@@ -791,7 +1668,7 @@ export default function OwnerDashboardScreen({ navigation }) {
               </View>
             </View>
           );
-        })}
+        }))}
       </View>
 
       {/* 8. Active Staff Overview */}
@@ -838,10 +1715,20 @@ export default function OwnerDashboardScreen({ navigation }) {
                     
                     {/* Quick Badges: Attendance & Advance */}
                     <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
-                      <View style={styles.staffChipAttBadge}>
-                        <Icon name="calendar-outline" size={10} color="#003C8F" style={{ marginRight: 3 }} />
-                        <Text style={styles.staffChipAttText}>{currentAtt.daysCount} Days</Text>
-                      </View>
+                      {s.staffType === 'watchman' ? (
+                        <View style={[styles.staffChipAttBadge, { backgroundColor: '#DBEAFE', borderColor: '#93C5FD' }]}>
+                          <Text style={[styles.staffChipAttText, { color: '#1E40AF', fontWeight: '800' }]}>🛡️ Watchman</Text>
+                        </View>
+                      ) : s.staffType === 'sweeper' ? (
+                        <View style={[styles.staffChipAttBadge, { backgroundColor: '#D1FAE5', borderColor: '#6EE7B7' }]}>
+                          <Text style={[styles.staffChipAttText, { color: '#065F46', fontWeight: '800' }]}>🧹 Sweeper</Text>
+                        </View>
+                      ) : (
+                        <View style={styles.staffChipAttBadge}>
+                          <Icon name="calendar-outline" size={10} color="#003C8F" style={{ marginRight: 3 }} />
+                          <Text style={styles.staffChipAttText}>{currentAtt.daysCount} Days</Text>
+                        </View>
+                      )}
                       {currentAdvTotal > 0 && (
                         <View style={styles.staffChipAdvBadge}>
                           <Text style={styles.staffChipAdvText}>₹{currentAdvTotal.toFixed(0)} Adv</Text>
@@ -989,8 +1876,9 @@ export default function OwnerDashboardScreen({ navigation }) {
     {/* Staff Salary Advance Details Modal */}
     <Modal
       visible={!!selectedStaffAdvanceDetails}
-      animationType="slide"
+      animationType="fade"
       transparent={true}
+      statusBarTranslucent={true}
       onRequestClose={() => setSelectedStaffAdvanceDetails(null)}
     >
       <View style={styles.advanceModalOverlay}>
@@ -1058,8 +1946,9 @@ export default function OwnerDashboardScreen({ navigation }) {
     {/* Dedicated Staff Attendance & Advance Detail Modal (Active Staff Click) */}
     <Modal
       visible={!!selectedStaffModal}
-      animationType="slide"
+      animationType="fade"
       transparent={true}
+      statusBarTranslucent={true}
       onRequestClose={() => setSelectedStaffModal(null)}
     >
       <View style={styles.staffModalOverlay}>
@@ -1071,7 +1960,22 @@ export default function OwnerDashboardScreen({ navigation }) {
                 <Icon name="person" size={22} color="#003C8F" />
               </View>
               <View style={{ marginLeft: 10, flex: 1 }}>
-                <Text style={styles.staffModalTitle}>{selectedStaffModal?.name || 'Staff'}</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <Text style={styles.staffModalTitle}>{selectedStaffModal?.name || 'Staff'}</Text>
+                  {selectedStaffModal?.staffType === 'watchman' ? (
+                    <View style={{ backgroundColor: '#DBEAFE', borderColor: '#93C5FD', borderWidth: 1, paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 5 }}>
+                      <Text style={{ fontSize: 10, fontWeight: '800', color: '#1E40AF' }}>🛡️ चौकीदार (Watchman)</Text>
+                    </View>
+                  ) : selectedStaffModal?.staffType === 'sweeper' ? (
+                    <View style={{ backgroundColor: '#D1FAE5', borderColor: '#6EE7B7', borderWidth: 1, paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 5 }}>
+                      <Text style={{ fontSize: 10, fontWeight: '800', color: '#065F46' }}>🧹 सफाईकर्मी (Sweeper)</Text>
+                    </View>
+                  ) : (
+                    <View style={{ backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', borderWidth: 1, paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 5 }}>
+                      <Text style={{ fontSize: 10, fontWeight: '800', color: '#003C8F' }}>⛽ सेल्समैन (Salesman)</Text>
+                    </View>
+                  )}
+                </View>
                 <Text style={styles.staffModalSubtitle}>📞 {selectedStaffModal?.phone || 'No phone'}</Text>
               </View>
             </View>
@@ -1148,7 +2052,7 @@ export default function OwnerDashboardScreen({ navigation }) {
                 {staffModalAttendance.daysCount} <Text style={{ fontSize: 13, fontWeight: 'normal' }}>Days</Text>
               </Text>
               <Text style={styles.staffModalStatCardSub}>
-                {staffModalAttendance.entriesCount} shifts • {staffModalAttendance.totalLiters.toFixed(0)} L sold
+                {staffModalAttendance.entriesCount} shifts recorded
               </Text>
             </View>
 
@@ -1281,6 +2185,336 @@ export default function OwnerDashboardScreen({ navigation }) {
         </View>
       </View>
     </Modal>
+
+    {/* Admin Direct Stock Edit Modal */}
+    <ScrollableModal
+      visible={showStockEditModal}
+      onRequestClose={() => setShowStockEditModal(false)}
+    >
+      <View style={styles.stockModalHeader}>
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          <Icon name="construct-outline" size={20} color="#003C8F" style={{ marginRight: 6 }} />
+          <Text style={styles.stockModalTitle}>टैंक स्टॉक एवं डिप सुधार (Admin)</Text>
+        </View>
+        <TouchableOpacity onPress={() => setShowStockEditModal(false)}>
+          <Icon name="close" size={24} color="#64748B" />
+        </TouchableOpacity>
+      </View>
+
+      <Text style={styles.stockModalSubTitle}>
+        भौतिक डिप नापने पर या किसी विसंगति के कारण टैंक स्टॉक गलत दिख रहा है, तो यहाँ वर्तमान सही लीटर और डिप दर्ज करें।
+      </Text>
+
+      {/* Tank 1 Edit */}
+      <View style={[styles.stockModalEditBlock, { borderColor: '#FED7AA', backgroundColor: '#FFF7ED' }]}>
+        <Text style={[styles.stockModalEditBlockTitle, { color: '#C2410C' }]}>
+          ⛽ Tank 1 (Petrol - MS)
+        </Text>
+        <View style={styles.stockModalRow}>
+          <View style={{ flex: 1.2, marginRight: 8 }}>
+            <Text style={styles.stockModalInputLabel}>सही स्टॉक (Liters) *:</Text>
+            <TextInput
+              style={styles.stockModalInput}
+              value={editTank1Liters}
+              onChangeText={setEditTank1Liters}
+              keyboardType="numeric"
+              placeholder="Liters"
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.stockModalInputLabel}>डिप (Dip cm):</Text>
+            <TextInput
+              style={styles.stockModalInput}
+              value={editTank1Dip}
+              onChangeText={setEditTank1Dip}
+              keyboardType="numeric"
+              placeholder="Dip in cm"
+            />
+          </View>
+        </View>
+      </View>
+
+      {/* Tank 2 Edit */}
+      <View style={[styles.stockModalEditBlock, { borderColor: '#BFDBFE', backgroundColor: '#EFF6FF', marginTop: 10 }]}>
+        <Text style={[styles.stockModalEditBlockTitle, { color: '#003C8F' }]}>
+          🛢️ Tank 2 (Diesel - HSD)
+        </Text>
+        <View style={styles.stockModalRow}>
+          <View style={{ flex: 1.2, marginRight: 8 }}>
+            <Text style={styles.stockModalInputLabel}>सही स्टॉक (Liters) *:</Text>
+            <TextInput
+              style={styles.stockModalInput}
+              value={editTank2Liters}
+              onChangeText={setEditTank2Liters}
+              keyboardType="numeric"
+              placeholder="Liters"
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.stockModalInputLabel}>डिप (Dip cm):</Text>
+            <TextInput
+              style={styles.stockModalInput}
+              value={editTank2Dip}
+              onChangeText={setEditTank2Dip}
+              keyboardType="numeric"
+              placeholder="Dip in cm"
+            />
+          </View>
+        </View>
+      </View>
+
+      <View style={{ flexDirection: 'row', gap: 10, marginTop: 14 }}>
+        <TouchableOpacity
+          style={styles.stockModalCancelBtn}
+          onPress={() => setShowStockEditModal(false)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.stockModalCancelBtnText}>रद्द करें</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.stockModalSaveBtn}
+          onPress={handleSaveStockEdit}
+          disabled={savingStockEdit}
+          activeOpacity={0.8}
+        >
+          {savingStockEdit ? (
+            <ActivityIndicator size="small" color="#fff" />
+          ) : (
+            <Text style={styles.stockModalSaveBtnText}>सुधार सेव करें (Save)</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+    </ScrollableModal>
+
+    {/* Interactive Card Drilldown Detail Modal */}
+    <Modal
+      visible={drilldownModal.visible}
+      animationType="fade"
+      transparent={true}
+      statusBarTranslucent={true}
+      onRequestClose={() => setDrilldownModal(prev => ({ ...prev, visible: false }))}
+    >
+      <View style={styles.drilldownModalOverlay}>
+        <View style={styles.drilldownModalContent}>
+          {/* Header */}
+          <View style={[styles.drilldownModalHeader, { borderLeftColor: drilldownModal.color }]}>
+            <View style={{ flex: 1 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Icon name={drilldownModal.icon} size={20} color={drilldownModal.color} style={{ marginRight: 6 }} />
+                <Text style={styles.drilldownModalTitle} numberOfLines={1}>{drilldownModal.title}</Text>
+              </View>
+              <Text style={styles.drilldownModalSubtitle}>{drilldownModal.subtitle}</Text>
+            </View>
+            <TouchableOpacity 
+              onPress={() => setDrilldownModal(prev => ({ ...prev, visible: false }))}
+              style={{ padding: 4 }}
+            >
+              <Icon name="close-circle" size={26} color="#64748B" />
+            </TouchableOpacity>
+          </View>
+
+          {/* List of items */}
+          <ScrollView style={{ maxHeight: 420, marginTop: 10 }} showsVerticalScrollIndicator={false}>
+            {drilldownModal.items.length === 0 ? (
+              <View style={styles.emptyDrilldownBox}>
+                <Icon name="information-circle-outline" size={34} color="#94A3B8" />
+                <Text style={styles.emptyDrilldownText}>
+                  चुने गए समय में कोई रिकॉर्ड नहीं मिला{'\n'}(No records found for selected period)
+                </Text>
+              </View>
+            ) : (
+              drilldownModal.items.map((item, index) => (
+                <View key={item.id || index} style={styles.drilldownEntryRow}>
+                  <View style={{ flex: 1, marginRight: 8 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <Text style={styles.drilldownEntryTitle}>{item.title}</Text>
+                      {item.badge ? (
+                        <View style={[styles.drilldownEntryBadge, { backgroundColor: drilldownModal.color + '18' }]}>
+                          <Text style={[styles.drilldownEntryBadgeText, { color: drilldownModal.color }]}>{item.badge}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text style={styles.drilldownEntrySubtitle}>{item.subtitle}</Text>
+                    {item.details ? (
+                      <Text style={styles.drilldownEntryDetails}>📝 {item.details}</Text>
+                    ) : null}
+                    <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                      <Icon name="time-outline" size={12} color="#94A3B8" />
+                      <Text style={styles.drilldownEntryDate}> {item.date}</Text>
+                    </View>
+                  </View>
+                  <View style={{ alignItems: 'flex-end', justifyContent: 'center' }}>
+                    <Text style={[styles.drilldownEntryAmount, { color: item.amountColor || drilldownModal.color }]}>
+                      {item.amountText}
+                    </Text>
+                    {item.amountSubText ? (
+                      <Text style={styles.drilldownEntryAmountSub}>{item.amountSubText}</Text>
+                    ) : null}
+                  </View>
+                </View>
+              ))
+            )}
+          </ScrollView>
+
+          {/* Total Footer */}
+          <View style={styles.drilldownFooterRow}>
+            <View>
+              <Text style={styles.drilldownFooterLabel}>{drilldownModal.totalLabel}</Text>
+              <Text style={[styles.drilldownFooterVal, { color: drilldownModal.color }]}>{drilldownModal.totalVal}</Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.drilldownCloseBtn, { backgroundColor: drilldownModal.color }]}
+              onPress={() => setDrilldownModal(prev => ({ ...prev, visible: false }))}
+            >
+              <Text style={styles.drilldownCloseBtnText}>बंद करें (Close)</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+
+    {/* Daily Photos 5-Day Date & Time List Modal */}
+    <Modal
+      visible={showDailyPhotosModal}
+      animationType="fade"
+      transparent={true}
+      statusBarTranslucent={false}
+      onRequestClose={() => setShowDailyPhotosModal(false)}
+    >
+      <View style={styles.drilldownModalOverlay}>
+        <View style={styles.drilldownModalContent}>
+          {/* Header */}
+          <View style={[styles.drilldownModalHeader, { borderLeftColor: '#003C8F' }]}>
+            <View style={{ flex: 1 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Icon name="camera" size={20} color="#003C8F" style={{ marginRight: 6 }} />
+                <Text style={styles.drilldownModalTitle}>Daily Images (दैनिक तस्वीरें)</Text>
+              </View>
+              <Text style={styles.drilldownModalSubtitle}>Date & Time wise (पिछले 5 दिन)</Text>
+            </View>
+            <TouchableOpacity 
+              onPress={() => setShowDailyPhotosModal(false)}
+              style={{ padding: 4 }}
+            >
+              <Icon name="close-circle" size={26} color="#64748B" />
+            </TouchableOpacity>
+          </View>
+
+          {/* List of 5-day photo sessions */}
+          <ScrollView style={{ maxHeight: 440, marginTop: 10 }} showsVerticalScrollIndicator={false}>
+            {dailyPhotosList.length === 0 ? (
+              <View style={styles.emptyDrilldownBox}>
+                <Icon name="images-outline" size={38} color="#94A3B8" />
+                <Text style={styles.emptyDrilldownText}>
+                  पिछले 5 दिनों में कोई फ़ोटो नहीं मिली{'\n'}(No photos in last 5 days)
+                </Text>
+              </View>
+            ) : (
+              dailyPhotosList.map((item, index) => {
+                const urls = Array.isArray(item.imageUrls) ? item.imageUrls : [];
+                const staff = item.staffName && item.staffName !== 'Aasish sir' && item.staffName !== 'Ashish sir' 
+                  ? item.staffName 
+                  : 'स्टाफ';
+                const dStr = formatDocDate(item.timestamp) || item.dateStr || 'Recent';
+
+                return (
+                  <TouchableOpacity
+                    key={item.id || index}
+                    activeOpacity={0.8}
+                    onPress={() => {
+                      if (urls.length > 0) {
+                        setFullscreenViewerData({
+                          visible: true,
+                          images: urls,
+                          titles: urls.map((_, i) => `${staff}${item.note ? ` • ${item.note}` : ''} (${dStr}) #${i + 1}`),
+                          initialIndex: 0,
+                          title: `${staff} (${dStr})`
+                        });
+                      }
+                    }}
+                    style={styles.dailyPhotoSessionCard}
+                  >
+                    <View style={styles.dailyPhotoSessionTop}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                          <Icon name="time" size={14} color="#003C8F" style={{ marginRight: 4 }} />
+                          <Text style={styles.dailyPhotoSessionDate}>{dStr}</Text>
+                        </View>
+                        <Text style={styles.dailyPhotoSessionStaff}>👤 {staff}</Text>
+                        {item.note ? (
+                          <Text style={styles.dailyPhotoSessionNote} numberOfLines={2}>
+                            📝 {item.note}
+                          </Text>
+                        ) : null}
+                      </View>
+
+                      <View style={styles.dailyPhotoCountPill}>
+                        <Icon name="images" size={12} color="#003C8F" style={{ marginRight: 4 }} />
+                        <Text style={styles.dailyPhotoCountPillText}>{urls.length} फ़ोटो</Text>
+                      </View>
+                    </View>
+
+                    {/* Thumbnail strip */}
+                    {urls.length > 0 && (
+                      <ScrollView 
+                        horizontal 
+                        showsHorizontalScrollIndicator={false} 
+                        style={{ marginTop: 8 }}
+                      >
+                        {urls.map((url, uIdx) => (
+                          <TouchableOpacity
+                            key={uIdx}
+                            activeOpacity={0.8}
+                            onPress={() => {
+                              setFullscreenViewerData({
+                                visible: true,
+                                images: urls,
+                                titles: urls.map((_, i) => `${staff}${item.note ? ` • ${item.note}` : ''} (${dStr}) #${i + 1}`),
+                                initialIndex: uIdx,
+                                title: `${staff} (${dStr})`
+                              });
+                            }}
+                            style={styles.dailyPhotoMiniThumbWrap}
+                          >
+                            <Image source={{ uri: url }} style={styles.dailyPhotoMiniThumb} resizeMode="cover" />
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+                    )}
+                  </TouchableOpacity>
+                );
+              })
+            )}
+          </ScrollView>
+
+          {/* Footer */}
+          <View style={styles.drilldownFooterRow}>
+            <View>
+              <Text style={styles.drilldownFooterLabel}>कुल प्रविष्टियां</Text>
+              <Text style={[styles.drilldownFooterVal, { color: '#003C8F' }]}>
+                {dailyPhotosList.length} Entries
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={[styles.drilldownCloseBtn, { backgroundColor: '#003C8F' }]}
+              onPress={() => setShowDailyPhotosModal(false)}
+            >
+              <Text style={styles.drilldownCloseBtnText}>बंद करें (Close)</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+
+    {/* Fullscreen Interactive Zoomable Image Viewer Modal (2-Finger Zoom) */}
+    <ImageViewerModal
+      visible={fullscreenViewerData.visible}
+      images={fullscreenViewerData.images}
+      titles={fullscreenViewerData.titles}
+      initialIndex={fullscreenViewerData.initialIndex}
+      title={fullscreenViewerData.title}
+      onClose={() => setFullscreenViewerData(prev => ({ ...prev, visible: false }))}
+    />
   </>
   );
 }
@@ -1320,6 +2554,161 @@ const styles = StyleSheet.create({
     borderRadius: 10 
   },
   
+  // Daily Photos Banner
+  dailyPhotosBannerCard: {
+    backgroundColor: '#EFF6FF',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1.5,
+    borderColor: '#BFDBFE',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    elevation: 2,
+    shadowColor: '#003C8F',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4
+  },
+  dailyPhotosIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#DBEAFE',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#93C5FD'
+  },
+  dailyPhotosBannerTitle: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#1E293B'
+  },
+  dailyPhotosCountBadge: {
+    backgroundColor: '#16A34A',
+    borderRadius: 10,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    marginLeft: 8
+  },
+  dailyPhotosCountBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: 'bold'
+  },
+  dailyPhotosBannerSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2
+  },
+  dailyPhotosViewBtn: {
+    backgroundColor: '#003C8F',
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    marginLeft: 8
+  },
+  dailyPhotosViewBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 'bold'
+  },
+
+  // Daily Photos Modal Cards
+  dailyPhotoCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0'
+  },
+  dailyPhotoCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8
+  },
+  dailyPhotoStaffName: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: '#0F172A'
+  },
+  dailyPhotoCategoryBadge: {
+    backgroundColor: '#E0F2FE',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+    marginLeft: 8,
+    borderWidth: 1,
+    borderColor: '#BAE6FD'
+  },
+  dailyPhotoCategoryText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#0284C7'
+  },
+  dailyPhotoTimeText: {
+    fontSize: 11,
+    color: '#64748B'
+  },
+  dailyPhotoCountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BFDBFE'
+  },
+  dailyPhotoCountBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  dailyPhotoNoteBox: {
+    backgroundColor: '#FEF3C7',
+    padding: 8,
+    borderRadius: 8,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#FDE68A'
+  },
+  dailyPhotoNoteText: {
+    fontSize: 12,
+    color: '#92400E',
+    fontWeight: '500'
+  },
+  dailyPhotoThumbnailScroll: {
+    marginTop: 4
+  },
+  dailyPhotoThumbWrapper: {
+    marginRight: 8,
+    borderRadius: 8,
+    overflow: 'hidden',
+    position: 'relative'
+  },
+  dailyPhotoThumbImg: {
+    width: 72,
+    height: 72,
+    borderRadius: 8,
+    backgroundColor: '#E2E8F0'
+  },
+  dailyPhotoZoomIcon: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 10,
+    width: 18,
+    height: 18,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+
   // Filter Row
   filterRow: {
     flexDirection: 'row',
@@ -2094,14 +3483,22 @@ const styles = StyleSheet.create({
   staffModalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    justifyContent: 'flex-end'
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16
   },
   staffModalContent: {
     backgroundColor: '#FFFFFF',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    borderRadius: 20,
     padding: 16,
-    maxHeight: '90%'
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '88%',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10
   },
   staffModalHeader: {
     flexDirection: 'row',
@@ -2334,5 +3731,325 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700'
+  },
+
+  // Stock Edit Header Button
+  stockEditHeaderBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BFDBFE'
+  },
+  stockEditHeaderBtnText: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+
+  // Admin Direct Stock Edit Modal
+  stockModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)'
+  },
+  stockModalScrollOverlay: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+    paddingVertical: 24
+  },
+  stockModalContent: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    width: '100%',
+    maxWidth: 500,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 5
+  },
+  stockModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6
+  },
+  stockModalTitle: {
+    fontSize: 15.5,
+    fontWeight: '800',
+    color: '#003C8F'
+  },
+  stockModalSubTitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 12,
+    lineHeight: 16
+  },
+  stockModalEditBlock: {
+    padding: 10,
+    borderRadius: 10,
+    borderWidth: 1
+  },
+  stockModalEditBlockTitle: {
+    fontSize: 12.5,
+    fontWeight: '700',
+    marginBottom: 4
+  },
+  stockModalRow: {
+    flexDirection: 'row',
+    marginTop: 4
+  },
+  stockModalInputLabel: {
+    fontSize: 11.5,
+    fontWeight: '600',
+    color: '#334155',
+    marginBottom: 4
+  },
+  stockModalInput: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 13,
+    color: '#0F172A'
+  },
+  stockModalCancelBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  stockModalCancelBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#475569'
+  },
+  stockModalSaveBtn: {
+    flex: 1.5,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: '#003C8F',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  stockModalSaveBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFFFFF'
+  },
+
+  cardViewMoreHint: {
+    fontSize: 10,
+    color: '#64748B',
+    marginTop: 6,
+    fontWeight: '700'
+  },
+  paymentBoxTapHint: {
+    fontSize: 9.5,
+    color: '#94A3B8',
+    marginTop: 4,
+    fontWeight: '600'
+  },
+
+  // Drilldown Modal Styles
+  drilldownModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center',
+    padding: 16
+  },
+  drilldownModalContent: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 16,
+    maxHeight: '85%',
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.2,
+    shadowRadius: 5
+  },
+  drilldownModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+    paddingBottom: 10,
+    borderLeftWidth: 4,
+    paddingLeft: 8
+  },
+  drilldownModalTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A'
+  },
+  drilldownModalSubtitle: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2,
+    fontWeight: '600'
+  },
+  emptyDrilldownBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 32
+  },
+  emptyDrilldownText: {
+    fontSize: 12,
+    color: '#94A3B8',
+    textAlign: 'center',
+    marginTop: 8,
+    lineHeight: 18
+  },
+  drilldownEntryRow: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center'
+  },
+  drilldownEntryTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#1E293B',
+    marginRight: 6
+  },
+  drilldownEntryBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6
+  },
+  drilldownEntryBadgeText: {
+    fontSize: 10,
+    fontWeight: '700'
+  },
+  drilldownEntrySubtitle: {
+    fontSize: 11,
+    color: '#475569',
+    marginTop: 2
+  },
+  drilldownEntryDetails: {
+    fontSize: 10.5,
+    color: '#64748B',
+    marginTop: 3,
+    fontStyle: 'italic'
+  },
+  drilldownEntryDate: {
+    fontSize: 10,
+    color: '#94A3B8'
+  },
+  drilldownEntryAmount: {
+    fontSize: 14,
+    fontWeight: '900'
+  },
+  drilldownEntryAmountSub: {
+    fontSize: 10,
+    color: '#64748B',
+    marginTop: 1,
+    fontWeight: '600'
+  },
+  // Daily Photos Session List Modal Styles
+  dailyPhotoSessionCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 12,
+    marginBottom: 10
+  },
+  dailyPhotoSessionTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start'
+  },
+  dailyPhotoSessionDate: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#003C8F'
+  },
+  dailyPhotoSessionStaff: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+    marginTop: 2
+  },
+  dailyPhotoSessionNote: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 3,
+    fontStyle: 'italic'
+  },
+  dailyPhotoCountPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BFDBFE'
+  },
+  dailyPhotoCountPillText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#003C8F'
+  },
+  dailyPhotoMiniThumbWrap: {
+    width: 60,
+    height: 60,
+    borderRadius: 8,
+    overflow: 'hidden',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#CBD5E1'
+  },
+  dailyPhotoMiniThumb: {
+    width: '100%',
+    height: '100%'
+  },
+
+  drilldownFooterRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+    paddingTop: 12,
+    marginTop: 8
+  },
+  drilldownFooterLabel: {
+    fontSize: 10,
+    color: '#64748B',
+    fontWeight: '700',
+    textTransform: 'uppercase'
+  },
+  drilldownFooterVal: {
+    fontSize: 16,
+    fontWeight: '900',
+    marginTop: 1
+  },
+  drilldownCloseBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8
+  },
+  drilldownCloseBtnText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 12
   }
 });

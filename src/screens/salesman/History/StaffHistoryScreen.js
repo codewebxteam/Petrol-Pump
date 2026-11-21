@@ -159,12 +159,15 @@ export default function StaffHistoryScreen() {
         dieselNetSold: Number(item.dieselQuantitySold || (item.fuelType === 'Diesel' ? item.quantitySold : 0) || 0),
         dieselRate: Number(item.dieselRate || (item.fuelType === 'Diesel' ? item.fuelRate : 0) || 0),
         dieselExpected: Number(item.dieselExpectedAmount || (item.fuelType === 'Diesel' ? item.expectedAmount : 0) || 0),
+        totalMobilAmount: Number(item.totalMobilAmount || 0),
+        totalMobilQty: Number(item.totalMobilQty || 0),
+        mobilEntries: item.mobilEntries || [],
         totalLitersSold: Number(item.totalQuantitySold || item.quantitySold || 0),
         totalExpectedAmount: Number(item.expectedTotalAmount || item.expectedAmount || 0),
         cashAmt: Number(item.cashAmount || 0),
         cashNotesAmt: Number(item.cashNotesAmount || 0),
         coinsAmt: Number(item.coinsAmount || 0),
-        digitalAmt: Number(item.onlineAmount || 0) || (Number(item.phonePeAmount || 0) + Number(item.paytmAmount || 0) + Number(item.bharatPeAmount || 0)),
+        digitalAmt: Number(item.onlineAmount || 0) || (Number(item.phonePeAmount || 0) + Number(item.paytmAmount || 0) + Number(item.atmAmount || 0) + Number(item.bobAmount || 0) + Number(item.bharatPeAmount || 0)),
         digitalEntries: item.digitalPaymentsBreakdown || [],
         udhariAmt: Number(item.udhariAmount || 0),
         udhariBreakdown: item.udhariBreakdown || [],
@@ -408,6 +411,29 @@ export default function StaffHistoryScreen() {
               </View>
             )}
 
+            {/* Mobil Sale Details */}
+            {Number(item.totalMobilAmount || 0) > 0 && (
+              <View style={[styles.fuelSectionBox, { borderColor: '#DDD6FE', backgroundColor: '#FAF5FF', marginTop: 10 }]}>
+                <View style={styles.detailRow}>
+                  <Text style={[styles.fuelTitle, { color: '#7C3AED' }]}>
+                    🛢️ मोबिल बिक्री (Mobil Sale):
+                  </Text>
+                  <Text style={[styles.detailValue, { color: '#7C3AED', fontWeight: 'bold' }]}>
+                    ₹{Number(item.totalMobilAmount).toLocaleString('en-IN')} ({item.totalMobilQty || item.mobilEntries?.length || 1} pcs)
+                  </Text>
+                </View>
+                {item.mobilEntries && item.mobilEntries.length > 0 && (
+                  <View style={{ marginTop: 4 }}>
+                    {item.mobilEntries.map((m, mi) => (
+                      <Text key={mi} style={{ fontSize: 11, color: '#6B7280', marginBottom: 2 }}>
+                        • {m.packSize || 'मोबिल'}: {m.quantity || 1} Pcs — ₹{m.amount}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+
             <View style={styles.divider} />
 
             {/* Payment Collection Details */}
@@ -426,7 +452,7 @@ export default function StaffHistoryScreen() {
             <View style={styles.detailRow}>
               <Text style={styles.detailLabel}>Digital & QR Payments:</Text>
               <Text style={[styles.detailValue, { color: '#003C8F' }]}>
-                ₹{Number(item.onlineAmount || 0) || (Number(item.phonePeAmount || 0) + Number(item.paytmAmount || 0) + Number(item.bharatPeAmount || 0))}
+                ₹{Number(item.onlineAmount || 0) || (Number(item.phonePeAmount || 0) + Number(item.paytmAmount || 0) + Number(item.atmAmount || 0) + Number(item.bobAmount || 0) + Number(item.bharatPeAmount || 0))}
               </Text>
             </View>
 
@@ -502,7 +528,7 @@ export default function StaffHistoryScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom']}>
       <View style={styles.container}>
         {/* Top Header Card */}
         <View style={styles.headerCard}>
@@ -511,9 +537,6 @@ export default function StaffHistoryScreen() {
           </View>
           <View style={{ flex: 1, marginLeft: 12 }}>
             <Text style={styles.headerTitle}>Staff Shift History</Text>
-            <Text style={styles.headerSubtitle}>
-              Filter by staff member, view fuel meter entries, collections & download PDF receipts
-            </Text>
           </View>
         </View>
 

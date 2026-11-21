@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, 
-  Modal, KeyboardAvoidingView, Platform, TextInput 
+  Modal, KeyboardAvoidingView, Platform, TextInput, ActivityIndicator 
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Toast from 'react-native-toast-message';
 import { Picker } from '@react-native-picker/picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { collection, onSnapshot, query, where, getDocs } from 'firebase/firestore';
@@ -15,32 +16,101 @@ import {
   updateDailyEntry,
   recordStaffSalaryAdvances,
   getStaffMonthlyAdvanceTotal,
-  getMonthKey
+  getMonthKey,
+  addDirectSalaryAdvance,
+  getStaffTypeDetails,
+  syncDefaultDigitalPaymentModes,
+  addPermanentDigitalPaymentMode,
+  deletePermanentDigitalPaymentMode,
+  DEFAULT_PERMANENT_DIGITAL_MODES
 } from '../../../services/dbServices';
 import { generateAndSharePdf } from '../../../utils/generatePdfReceipt';
-import { createEditRequest, verifyEditOtp, findTodayEntry, getTodayMachineEntries } from '../../../utils/otpHelper';
+import { 
+  createEditRequest, 
+  verifyEditOtp, 
+  findTodayEntry, 
+  getTodayMachineEntries,
+  findEntryForDate,
+  getMachineEntriesForDate,
+  getSubmittedReportsForDate
+} from '../../../utils/otpHelper';
+import DateTimePicker from '@react-native-community/datetimepicker';
 import CustomInput from '../../../components/CustomInput';
 import CustomButton from '../../../components/CustomButton';
+import ScrollableModal from '../../../components/ScrollableModal';
 import Icon from '@expo/vector-icons/Ionicons';
 
-// Preset Non-Cash / Digital Payment Modes (ATM, UPI, Fleet, Cards, Offers)
-const PRESET_PAYMENT_MODES = [
-  { id: 'paytm', name: 'Paytm (पेटीएम)', icon: 'wallet-outline', color: '#00B9F5' },
-  { id: 'phonepe', name: 'PhonePe (फोनपे)', icon: 'phone-portrait-outline', color: '#5F259F' },
-  { id: 'atm', name: 'ATM / POS स्वाइप', icon: 'card-outline', color: '#003C8F' },
-  { id: 'extrapower', name: 'ExtraPower (फ्लीट कार्ड)', icon: 'speedometer-outline', color: '#FF6F00' },
-  { id: 'extrareward', name: 'ExtraReward (XTRARewards)', icon: 'gift-outline', color: '#EA580C' },
-  { id: 'debit_card', name: 'Debit Card (डेबिट कार्ड)', icon: 'card-outline', color: '#0284C7' },
-  { id: 'credit_card', name: 'Credit Card (क्रेडिट कार्ड)', icon: 'card-outline', color: '#7C3AED' },
-  { id: 'gpay', name: 'Google Pay (GPay)', icon: 'logo-google', color: '#4285F4' },
-  { id: 'offer', name: 'Offer / Voucher (छूट)', icon: 'pricetag-outline', color: '#16A34A' },
-  { id: 'bharatpe', name: 'BharatPe / QR', icon: 'qr-code-outline', color: '#0F766E' }
+// Fixed 4 Digital / Bank Payment Modes
+export const FIXED_DIGITAL_MODES = [
+  { id: 'paytm', modeId: 'paytm', name: 'Paytm (पेटीएम)', icon: 'wallet-outline', color: '#00B9F5' },
+  { id: 'phonepe', modeId: 'phonepe', name: 'PhonePe (फोनपे)', icon: 'phone-portrait-outline', color: '#5F259F' },
+  { id: 'atm', modeId: 'atm', name: 'ATM / POS स्वाइप', icon: 'card-outline', color: '#003C8F' },
+  { id: 'bob', modeId: 'bob', name: 'BOB Bank (बैंक ऑफ बड़ौदा)', icon: 'business-outline', color: '#EA580C' }
 ];
 
+export const createDefaultDigitalEntries = () => [
+  { id: 'paytm', modeId: 'paytm', name: 'Paytm (पेटीएम)', icon: 'wallet-outline', color: '#00B9F5', amount: '' },
+  { id: 'phonepe', modeId: 'phonepe', name: 'PhonePe (फोनपे)', icon: 'phone-portrait-outline', color: '#5F259F', amount: '' },
+  { id: 'atm', modeId: 'atm', name: 'ATM / POS स्वाइप', icon: 'card-outline', color: '#003C8F', amount: '' },
+  { id: 'bob', modeId: 'bob', name: 'BOB Bank (बैंक ऑफ बड़ौदा)', icon: 'business-outline', color: '#EA580C', amount: '' }
+];
+
+export const mergeDigitalEntriesWithBreakdown = (breakdown = [], entry = {}, masterModes = null) => {
+  const modesList = (masterModes && masterModes.length > 0) ? masterModes : createDefaultDigitalEntries();
+  const baseEntries = modesList.map(mode => {
+    let amt = '';
+    const found = (breakdown || []).find(b => b.modeId === mode.modeId || b.id === mode.id);
+    if (found && found.amount !== undefined && found.amount !== null && found.amount !== '') {
+      amt = String(found.amount);
+    } else if ((mode.modeId === 'paytm' || mode.id === 'paytm') && entry.paytmAmount) {
+      amt = String(entry.paytmAmount);
+    } else if ((mode.modeId === 'phonepe' || mode.id === 'phonepe') && entry.phonePeAmount) {
+      amt = String(entry.phonePeAmount);
+    } else if ((mode.modeId === 'atm' || mode.id === 'atm') && entry.atmAmount) {
+      amt = String(entry.atmAmount);
+    } else if ((mode.modeId === 'bob' || mode.id === 'bob') && entry.bobAmount) {
+      amt = String(entry.bobAmount);
+    }
+    return { ...mode, amount: amt };
+  });
+
+  // Preserve any additional digital modes previously saved in breakdown
+  const extraEntries = (breakdown || []).filter(b => 
+    !baseEntries.some(m => m.id === b.id || m.modeId === b.modeId)
+  ).map(b => ({
+    id: b.id || `mode_${Date.now()}_${Math.random()}`,
+    modeId: b.modeId || b.id || 'custom',
+    name: b.name || 'Other Digital',
+    icon: b.icon || 'card-outline',
+    color: b.color || '#0F766E',
+    amount: b.amount ? String(b.amount) : '',
+    isFixed: false
+  }));
+
+  return [...baseEntries, ...extraEntries];
+};
+
 export default function DailyEntryScreen({ navigation }) {
+  const scrollViewRef = useRef(null);
+
+  // Date Selection State (Today, Yesterday, Custom Date)
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [dateFilterMode, setDateFilterMode] = useState('today'); // 'today' | 'yesterday' | 'custom'
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [submittedSalesmenMap, setSubmittedSalesmenMap] = useState({}); // salesmanId -> [reports]
+
   // Staff Selection
   const [salesmen, setSalesmen] = useState([]);
   const [selectedSalesman, setSelectedSalesman] = useState('');
+
+  // Support Staff States (Chaukidaar / Sweeper Non-Dispenser Payments)
+  const [supportAmt, setSupportAmt] = useState('');
+  const [supportPaymentMode, setSupportPaymentMode] = useState('Cash'); // 'Cash' | 'PhonePe' | 'BOB Bank'
+  const [supportNotes, setSupportNotes] = useState('');
+  const [supportSaving, setSupportSaving] = useState(false);
+  const [supportAdvanceHistory, setSupportAdvanceHistory] = useState([]);
+  const [supportMonthTotal, setSupportMonthTotal] = useState(0);
+  const [supportHistoryLoading, setSupportHistoryLoading] = useState(false);
 
   // Machine Selection
   const [machines, setMachines] = useState([]);
@@ -57,6 +127,7 @@ export default function DailyEntryScreen({ navigation }) {
   const [petrolOpeningMeter, setPetrolOpeningMeter] = useState('');
   const [petrolClosingMeter, setPetrolClosingMeter] = useState('');
   const [petrolTestingQty, setPetrolTestingQty] = useState('5'); // Default 5L standard testing
+  const [petrolOfficialTestingQty, setPetrolOfficialTestingQty] = useState('0'); // Default 0L official testing
   const [petrolRate, setPetrolRate] = useState('');
   const [petrolAutoLoaded, setPetrolAutoLoaded] = useState(false);
 
@@ -64,6 +135,7 @@ export default function DailyEntryScreen({ navigation }) {
   const [dieselOpeningMeter, setDieselOpeningMeter] = useState('');
   const [dieselClosingMeter, setDieselClosingMeter] = useState('');
   const [dieselTestingQty, setDieselTestingQty] = useState('5'); // Default 5L standard testing
+  const [dieselOfficialTestingQty, setDieselOfficialTestingQty] = useState('0'); // Default 0L official testing
   const [dieselRate, setDieselRate] = useState('');
   const [dieselAutoLoaded, setDieselAutoLoaded] = useState(false);
 
@@ -86,15 +158,15 @@ export default function DailyEntryScreen({ navigation }) {
   const [udhari, setUdhari] = useState('');
   const [expense, setExpense] = useState('');
 
-  // 1. Multi-Mode Digital & Card Payments State
+  // 1. Multi-Mode Digital & Card Payments State (Synced permanently with Firestore)
   const [digitalModalVisible, setDigitalModalVisible] = useState(false);
-  const [digitalEntries, setDigitalEntries] = useState([
-    { id: 'init_paytm', modeId: 'paytm', name: 'Paytm (पेटीएम)', amount: '' },
-    { id: 'init_phonepe', modeId: 'phonepe', name: 'PhonePe (फोनपे)', amount: '' },
-    { id: 'init_atm', modeId: 'atm', name: 'ATM / POS स्वाइप', amount: '' }
-  ]);
-  const [customModeInputVisible, setCustomModeInputVisible] = useState(false);
-  const [customModeName, setCustomModeName] = useState('');
+  const [digitalEntries, setDigitalEntries] = useState(createDefaultDigitalEntries());
+  const [masterDigitalModes, setMasterDigitalModes] = useState(DEFAULT_PERMANENT_DIGITAL_MODES);
+
+  // Permanent Mode Creation Modal
+  const [addModeModalVisible, setAddModeModalVisible] = useState(false);
+  const [newModeName, setNewModeName] = useState('');
+  const [isSavingNewMode, setIsSavingNewMode] = useState(false);
 
   // Calculate Digital Total
   const calculateDigitalTotal = (entries = digitalEntries) => {
@@ -103,50 +175,62 @@ export default function DailyEntryScreen({ navigation }) {
 
   const handleDigitalAmountChange = (id, value) => {
     const val = sanitizeDecimalInput(value);
-    const updated = digitalEntries.map(entry => entry.id === id ? { ...entry, amount: val } : entry);
+    const updated = digitalEntries.map(entry => (entry.id === id || entry.modeId === id) ? { ...entry, amount: val } : entry);
     setDigitalEntries(updated);
     const total = calculateDigitalTotal(updated);
     setOnline(total > 0 ? total.toFixed(2) : '');
   };
 
-  const addPresetPaymentMode = (preset) => {
-    // If already exists, don't duplicate mode
-    const existing = digitalEntries.find(e => e.modeId === preset.id);
-    if (existing) {
-      Alert.alert('मौजूद है', `${preset.name} पहले से सूची में है.`);
+  // Add a permanent digital payment channel to Firestore
+  const handleSavePermanentMode = async (presetName = '') => {
+    const finalName = (presetName || newModeName || '').trim();
+    if (!finalName) {
+      Alert.alert('नाम आवश्यक है', 'कृपया नए डिजिटल पेमेंट का नाम दर्ज करें (उदा. Google Pay, BharatPe).');
       return;
     }
-    const newEntry = {
-      id: `${preset.id}_${Date.now()}`,
-      modeId: preset.id,
-      name: preset.name,
-      amount: ''
-    };
-    setDigitalEntries([...digitalEntries, newEntry]);
-  };
 
-  const addCustomPaymentMode = () => {
-    if (!customModeName.trim()) {
-      Alert.alert('Required', 'कृपया नए पेमेंट माध्यम का नाम दर्ज करें.');
-      return;
+    setIsSavingNewMode(true);
+    try {
+      await addPermanentDigitalPaymentMode({ name: finalName });
+      Toast.show({
+        type: 'success',
+        text1: 'पेमेंट माध्यम स्थायी रूप से जोड़ा गया!',
+        text2: `'${finalName}' अब ऐप में हमेशा के लिए उपलब्ध रहेगा।`
+      });
+      setNewModeName('');
+      setAddModeModalVisible(false);
+    } catch (err) {
+      Alert.alert('त्रुटि', err.message || 'पेमेंट माध्यम जोड़ने में विफल.');
+    } finally {
+      setIsSavingNewMode(false);
     }
-    const newEntry = {
-      id: `custom_${Date.now()}`,
-      modeId: 'custom',
-      name: customModeName.trim(),
-      amount: '',
-      isCustom: true
-    };
-    setDigitalEntries([...digitalEntries, newEntry]);
-    setCustomModeName('');
-    setCustomModeInputVisible(false);
   };
 
-  const removeDigitalEntry = (id) => {
-    const updated = digitalEntries.filter(entry => entry.id !== id);
-    setDigitalEntries(updated);
-    const total = calculateDigitalTotal(updated);
-    setOnline(total > 0 ? total.toFixed(2) : '');
+  // Permanently delete a digital payment channel from Firestore
+  const handleDeletePermanentMode = (modeItem) => {
+    Alert.alert(
+      'पेमेंट माध्यम स्थायी रूप से हटाएं?',
+      `क्या आप '${modeItem.name}' को हमेशा के लिए हटाना चाहते हैं?\n\nयह ऐप के डिजिटल पेमेंट सूची से स्थायी रूप से डिलीट हो जाएगा।`,
+      [
+        { text: 'रद्द करें', style: 'cancel' },
+        {
+          text: 'हाँ, स्थायी हटाएं (Delete)',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deletePermanentDigitalPaymentMode(modeItem.id);
+              Toast.show({
+                type: 'success',
+                text1: 'पेमेंट माध्यम हटाया गया',
+                text2: `'${modeItem.name}' को स्थायी रूप से हटा दिया गया है।`
+              });
+            } catch (err) {
+              Alert.alert('त्रुटि', err.message || 'पेमेंट माध्यम हटाने में विफल.');
+            }
+          }
+        }
+      ]
+    );
   };
 
   // 2. Cash Breakdown
@@ -290,14 +374,20 @@ export default function DailyEntryScreen({ navigation }) {
   ]);
   const [isExpenseMatched, setIsExpenseMatched] = useState(false);
   const [staffMonthlyAdvancesMap, setStaffMonthlyAdvancesMap] = useState({});
+  const [staffMonthlyAdvanceRecordsMap, setStaffMonthlyAdvanceRecordsMap] = useState({});
 
   const fetchMonthlyAdvanceForStaff = async (staffId) => {
     if (!staffId) return;
     try {
-      const res = await getStaffMonthlyAdvanceTotal(staffId);
+      const sObj = effectiveSalesmen.find(s => s.id === staffId);
+      const res = await getStaffMonthlyAdvanceTotal(staffId, getMonthKey(), sObj?.name);
       setStaffMonthlyAdvancesMap(prev => ({
         ...prev,
         [staffId]: res.totalAdvance
+      }));
+      setStaffMonthlyAdvanceRecordsMap(prev => ({
+        ...prev,
+        [staffId]: res.records || []
       }));
     } catch (e) {
       console.warn("Error fetching monthly advance for staff:", e);
@@ -356,6 +446,40 @@ export default function DailyEntryScreen({ navigation }) {
     setExpenseBreakdownData(expenseBreakdownData.filter(item => item.id !== id));
   };
 
+  // 5. Additional Mobil / Lubricants Sale State (Optional)
+  const [mobilEntries, setMobilEntries] = useState([]);
+
+  const handleAddMobilRow = (presetPack = '') => {
+    setMobilEntries(prev => [
+      ...prev,
+      {
+        id: Date.now().toString() + Math.random().toString(36).substr(2, 4),
+        packSize: presetPack || '',
+        quantity: '1',
+        amount: ''
+      }
+    ]);
+  };
+
+  const handleUpdateMobilRow = (id, field, value) => {
+    setMobilEntries(prev => prev.map(item => {
+      if (item.id === id) {
+        if (field === 'amount') {
+          return { ...item, [field]: sanitizeDecimalInput(value) };
+        }
+        if (field === 'quantity') {
+          return { ...item, [field]: value.replace(/[^0-9]/g, '') };
+        }
+        return { ...item, [field]: value };
+      }
+      return item;
+    }));
+  };
+
+  const handleRemoveMobilRow = (id) => {
+    setMobilEntries(prev => prev.filter(item => item.id !== id));
+  };
+
   // 4-Decimal Utilities
   const sanitizeDecimalInput = (val) => {
     if (!val) return '';
@@ -374,22 +498,457 @@ export default function DailyEntryScreen({ navigation }) {
     return num.toFixed(4);
   };
 
-  // Fallbacks
-  const fallbackSalesmen = [
-    { id: 'staff_1', name: 'राहुल कुमार (Rahul Kumar)' },
-    { id: 'staff_2', name: 'अमित सिंह (Amit Singh)' },
-    { id: 'staff_3', name: 'विकास यादव (Vikas Yadav)' },
-    { id: 'staff_4', name: 'संजय वर्मा (Sanjay Verma)' }
-  ];
+  const effectiveSalesmen = salesmen;
+  const effectiveMachines = machines;
 
-  const fallbackMachines = [
-    { id: 'DU1', name: 'DU1', petrolNozzle: 'N1', dieselNozzle: 'N2' },
-    { id: 'DU2', name: 'DU2', petrolNozzle: 'N3', dieselNozzle: 'N4' },
-    { id: 'DU3', name: 'DU3', petrolNozzle: 'N5', dieselNozzle: 'N6' }
-  ];
+  // Selected Staff Object & Support Staff (Watchman / Sweeper) Detection
+  const selectedStaffObj = useMemo(() => {
+    return effectiveSalesmen.find(s => s.id === selectedSalesman);
+  }, [effectiveSalesmen, selectedSalesman]);
 
-  const effectiveSalesmen = salesmen.length > 0 ? salesmen : fallbackSalesmen;
-  const effectiveMachines = machines.length > 0 ? machines : fallbackMachines;
+  const isSupportStaff = useMemo(() => {
+    if (!selectedStaffObj) return false;
+    const t = (selectedStaffObj.staffType || '').toLowerCase();
+    const n = (selectedStaffObj.name || '').toLowerCase();
+    return t === 'watchman' || t === 'sweeper' || 
+           n.includes('चौकीदार') || n.includes('watchman') || n.includes('guard') ||
+           n.includes('सफाई') || n.includes('sweeper') || n.includes('स्वीपर');
+  }, [selectedStaffObj]);
+
+  // Load Support Staff Monthly Advances ("जहाँ से कितना पैसा लिए हैं वो दिख सके")
+  const loadSupportStaffAdvances = async (staffId, targetDate = selectedDate, staffName = selectedStaffObj?.name) => {
+    if (!staffId) return;
+    setSupportHistoryLoading(true);
+    try {
+      const monthK = getMonthKey(targetDate);
+      const res = await getStaffMonthlyAdvanceTotal(staffId, monthK, staffName);
+      setSupportMonthTotal(res.totalAdvance || 0);
+      setSupportAdvanceHistory(res.records || []);
+    } catch (e) {
+      console.warn("Error fetching support staff advance data:", e);
+    } finally {
+      setSupportHistoryLoading(false);
+    }
+  };
+
+  // Direct Payment / Wages Save Handler for Support Staff (Chaukidaar / Sweeper)
+  const handleSaveSupportPayment = async () => {
+    const amt = parseFloat(supportAmt);
+    if (!amt || amt <= 0) {
+      Alert.alert('अमान्य राशि', 'कृपया भुगतान राशि (0 से अधिक) दर्ज करें।');
+      return;
+    }
+
+    setSupportSaving(true);
+    try {
+      const isWatch = (selectedStaffObj?.staffType === 'watchman' || selectedStaffObj?.name?.toLowerCase().includes('चौकीदार'));
+      const staffType = isWatch ? 'watchman' : 'sweeper';
+      const staffTitle = isWatch ? 'चौकीदार' : 'सफाईकर्मी';
+      const cleanNotes = (supportNotes.trim() || `${staffTitle} मानदेय / मजदूरी`) + ` (माध्यम: ${supportPaymentMode})`;
+
+      const res = await addDirectSalaryAdvance({
+        salesmanId: selectedSalesman,
+        salesmanName: selectedStaffObj?.name || 'Staff',
+        staffType: staffType,
+        paymentMode: supportPaymentMode,
+        amount: amt,
+        notes: cleanNotes,
+        date: selectedDate,
+        machineId: 'Support Staff',
+        machineName: `${staffTitle} भुगतान`
+      });
+
+      if (res.success) {
+        Alert.alert(
+          'भुगतान दर्ज सफल ✅',
+          `${selectedStaffObj?.name} (${staffTitle}) को ₹${amt.toLocaleString('en-IN')} का भुगतान सफलतापूर्वक दर्ज कर दिया गया है।\n\nयह आज के खर्चों, दैनिक ऑडिट रिपोर्ट (PDF) और Owner Panel में शामिल हो गया है।`
+        );
+        setSupportAmt('');
+        loadSupportStaffAdvances(selectedSalesman, selectedDate, selectedStaffObj?.name);
+      } else {
+        Alert.alert('त्रुटि', res.error || 'भुगतान दर्ज नहीं हो सका। कृपया पुनः प्रयास करें।');
+      }
+    } catch (error) {
+      console.error('Error saving support payment:', error);
+      Alert.alert('त्रुटि', error.message || 'भुगतान दर्ज करने में समस्या आई।');
+    } finally {
+      setSupportSaving(false);
+    }
+  };
+
+  // Automatically sync support staff advances when salesman or date changes
+  useEffect(() => {
+    if (selectedSalesman && isSupportStaff) {
+      setSelectedMachine('');
+      const isWatch = (selectedStaffObj?.staffType === 'watchman' || selectedStaffObj?.name?.toLowerCase().includes('चौकीदार'));
+      const defaultNotes = isWatch ? 'चौकीदार मानदेय / मजदूरी' : 'सफाईकर्मी दैनिक मजदूरी';
+      setSupportNotes(defaultNotes);
+      loadSupportStaffAdvances(selectedSalesman, selectedDate, selectedStaffObj?.name);
+    }
+  }, [selectedSalesman, isSupportStaff, selectedDate]);
+
+  // Date Utilities & Handlers
+  const isDateToday = (d) => {
+    const today = new Date();
+    return d.getDate() === today.getDate() &&
+      d.getMonth() === today.getMonth() &&
+      d.getFullYear() === today.getFullYear();
+  };
+
+  const isDateYesterday = (d) => {
+    const yest = new Date();
+    yest.setDate(yest.getDate() - 1);
+    return d.getDate() === yest.getDate() &&
+      d.getMonth() === yest.getMonth() &&
+      d.getFullYear() === yest.getFullYear();
+  };
+
+  // Clears all entered inputs so previous data is NEVER shown when changing staff or machine
+  const resetFormFields = () => {
+    setPetrolClosingMeter('');
+    setDieselClosingMeter('');
+    setPetrolTestingQty('5');
+    setPetrolOfficialTestingQty('0');
+    setDieselTestingQty('5');
+    setDieselOfficialTestingQty('0');
+    setPetrolTestingAlreadyDone(false);
+    setDieselTestingAlreadyDone(false);
+    setPetrolRate('');
+    setDieselRate('');
+    setPetrolAutoLoaded(false);
+    setDieselAutoLoaded(false);
+
+    setIsEditMode(false);
+    setExistingReportId(null);
+    setExistingReportData(null);
+    setIsFormClearedForFreshFill(false);
+
+    setCash('');
+    setCoins('');
+    setOnline('');
+    setUdhari('');
+    setExpense('');
+    setIsCashMatched(false);
+    setIsUdhariMatched(false);
+    setIsExpenseMatched(false);
+
+    setBreakdownData({
+      notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
+      coins20: '', coins10: '', coins5: '', coins2: '', coins1: ''
+    });
+    setBreakdownTotal(0);
+
+    setDigitalEntries((masterDigitalModes || []).map(m => ({ ...m, amount: '' })));
+    setMobilEntries([]);
+    setUdhariBreakdownData([{ id: Date.now().toString(), name: '', amount: '' }]);
+    setUdhariReturnEntries([]);
+    setSelectedReturnCustomer('');
+    setExpenseBreakdownData([{ id: Date.now().toString(), type: 'general', reason: '', amount: '', salesmanId: '', salesmanName: '' }]);
+  };
+
+  // Helper to check for existing entry on target date and populate Edit Mode
+  const checkEditModeForStaffAndMachine = async (salesmanId, machineId, targetDate = selectedDate) => {
+    if (!salesmanId || !machineId) return;
+    try {
+      const existingEntry = await findEntryForDate(salesmanId, machineId, targetDate);
+      if (existingEntry) {
+        setIsEditMode(true);
+        setExistingReportId(existingEntry.id);
+        setExistingReportData(existingEntry);
+
+        // Pre-fill meters
+        if (existingEntry.petrolOpeningMeter) setPetrolOpeningMeter(String(existingEntry.petrolOpeningMeter));
+        if (existingEntry.petrolClosingMeter) setPetrolClosingMeter(String(existingEntry.petrolClosingMeter));
+        if (existingEntry.dieselOpeningMeter) setDieselOpeningMeter(String(existingEntry.dieselOpeningMeter));
+        if (existingEntry.dieselClosingMeter) setDieselClosingMeter(String(existingEntry.dieselClosingMeter));
+
+        setPetrolTestingQty(String(existingEntry.petrolNormalTesting ?? existingEntry.petrolTesting ?? '5'));
+        setPetrolOfficialTestingQty(String(existingEntry.petrolOfficialTesting ?? '0'));
+        setDieselTestingQty(String(existingEntry.dieselNormalTesting ?? existingEntry.dieselTesting ?? '5'));
+        setDieselOfficialTestingQty(String(existingEntry.dieselOfficialTesting ?? '0'));
+        if (existingEntry.petrolRate) setPetrolRate(String(existingEntry.petrolRate));
+        if (existingEntry.dieselRate) setDieselRate(String(existingEntry.dieselRate));
+
+        // Pre-fill payments
+        if (existingEntry.cashNotesAmount !== undefined) {
+          setCash(String(existingEntry.cashNotesAmount));
+        } else if (existingEntry.cashAmount) {
+          setCash(String(existingEntry.cashAmount));
+        }
+        if (existingEntry.coinsAmount !== undefined) {
+          setCoins(String(existingEntry.coinsAmount));
+        } else {
+          setCoins('');
+        }
+        setOnline(existingEntry.onlineAmount ? String(existingEntry.onlineAmount) : '');
+        setUdhari(existingEntry.udhariAmount ? String(existingEntry.udhariAmount) : '');
+        setExpense(existingEntry.expenses ? String(existingEntry.expenses) : '');
+
+        if (existingEntry.digitalPaymentsBreakdown && existingEntry.digitalPaymentsBreakdown.length > 0) {
+          setDigitalEntries(mergeDigitalEntriesWithBreakdown(existingEntry.digitalPaymentsBreakdown, existingEntry, masterDigitalModes));
+        } else if (existingEntry.paytmAmount || existingEntry.phonePeAmount || existingEntry.atmAmount || existingEntry.bobAmount) {
+          setDigitalEntries(mergeDigitalEntriesWithBreakdown([], existingEntry, masterDigitalModes));
+        } else {
+          setDigitalEntries((masterDigitalModes || []).map(m => ({ ...m, amount: '' })));
+        }
+        if (existingEntry.cashBreakdown) {
+          setBreakdownData(existingEntry.cashBreakdown);
+          setIsCashMatched(true);
+          setBreakdownTotal(calculateBreakdownTotal(existingEntry.cashBreakdown));
+        }
+        if (existingEntry.udhariBreakdown && existingEntry.udhariBreakdown.length > 0) {
+          setUdhariBreakdownData(existingEntry.udhariBreakdown);
+          setIsUdhariMatched(true);
+        }
+        if (existingEntry.expenseBreakdown && existingEntry.expenseBreakdown.length > 0) {
+          setExpenseBreakdownData(existingEntry.expenseBreakdown);
+          setIsExpenseMatched(true);
+        }
+        if (existingEntry.mobilEntries && existingEntry.mobilEntries.length > 0) {
+          setMobilEntries(existingEntry.mobilEntries.map(e => ({
+            id: e.id || Date.now().toString() + Math.random().toString(36).substr(2, 4),
+            packSize: e.packSize || '',
+            quantity: String(e.quantity || '1'),
+            amount: String(e.amount || '')
+          })));
+        } else if (existingEntry.totalMobilAmount) {
+          setMobilEntries([{
+            id: Date.now().toString(),
+            packSize: 'मोबिल',
+            quantity: String(existingEntry.totalMobilQty || '1'),
+            amount: String(existingEntry.totalMobilAmount)
+          }]);
+        } else {
+          setMobilEntries([]);
+        }
+
+        setIsFormClearedForFreshFill(false);
+        const dateStr = targetDate.toLocaleDateString('hi-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+        Alert.alert(
+          `⚠️ ${dateStr} की एंट्री मिली! (Edit Mode)`,
+          `इस मशीन और स्टाफ की ${dateStr} की बिक्री पहले से दर्ज है। पूरा डेटा फॉर्म में लोड हो गया है। आप इसमें बदलाव कर सकते हैं या फ़ॉर्म खाली कर शुरू से भर सकते हैं। सबमिट करने पर Admin से 6-digit OTP लेना होगा।`,
+          [{ text: 'समझ गया (OK)' }]
+        );
+      } else {
+        // No existing entry for this staff on this machine: wipe old inputs
+        resetFormFields();
+      }
+    } catch (err) {
+      console.warn('Edit check error:', err);
+    }
+  };
+
+  // When Machine Changes: Auto-Carry Last Closing Meters & Reset Previous Inputs!
+  const handleMachineChange = async (machineId, targetDate = selectedDate, staffId = selectedSalesman) => {
+    setSelectedMachine(machineId);
+
+    // ALWAYS reset previous user inputs so previous machine's or old data is NEVER shown!
+    resetFormFields();
+
+    if (!machineId) {
+      setSelectedMachineData(null);
+      setPetrolOpeningMeter('');
+      setDieselOpeningMeter('');
+      return;
+    }
+
+    // Determine default nozzles according to DU1 (N1+N2), DU2 (N3+N4), DU3 (N5+N6)
+    const match = String(machineId).match(/\d+/);
+    const machNum = match ? parseInt(match[0], 10) : 1;
+    const defaultPNozzleId = `N${(machNum - 1) * 2 + 1}`;
+    const defaultDNozzleId = `N${(machNum - 1) * 2 + 2}`;
+
+    const mach = effectiveMachines.find(m => m.id === machineId) || { id: machineId, name: machineId };
+    setSelectedMachineData(mach);
+
+    const machNozzles = nozzlesList.filter(n => n.machineId === machineId || n.machineName === machineId);
+    
+    // Petrol nozzle detection
+    const pNozzle = machNozzles.find(n => n.fuelType === 'Petrol' || n.nozzleId === (mach.petrolNozzle || defaultPNozzleId)) || {
+      id: `${machineId}-${mach.petrolNozzle || defaultPNozzleId}`,
+      nozzleId: mach.petrolNozzle || defaultPNozzleId,
+      fuelType: 'Petrol',
+      fuelRate: '',
+      currentMeterReading: null
+    };
+    const activePNozzleId = mach.petrolNozzle || pNozzle.nozzleId || defaultPNozzleId;
+    setCurrentPetrolNozzleId(activePNozzleId);
+
+    // Diesel nozzle detection
+    const dNozzle = machNozzles.find(n => n.fuelType === 'Diesel' || n.nozzleId === (mach.dieselNozzle || defaultDNozzleId)) || {
+      id: `${machineId}-${mach.dieselNozzle || defaultDNozzleId}`,
+      nozzleId: mach.dieselNozzle || defaultDNozzleId,
+      fuelType: 'Diesel',
+      fuelRate: '',
+      currentMeterReading: null
+    };
+    const activeDNozzleId = mach.dieselNozzle || dNozzle.nozzleId || defaultDNozzleId;
+    setCurrentDieselNozzleId(activeDNozzleId);
+
+    try {
+      // 1. Fetch all entries on target date for this machine to determine Shift Number & Last Closing
+      const entriesToday = await getMachineEntriesForDate(machineId, targetDate);
+      setTodayMachineEntries(entriesToday);
+      const computedShift = entriesToday.length + 1;
+      setShiftNumber(computedShift);
+
+      if (entriesToday.length > 0) {
+        // Shift 2 or subsequent shift:
+        // Automatically take the latest submitted entry's closing meter as opening meter!
+        const lastEntry = entriesToday[entriesToday.length - 1];
+        if (lastEntry.petrolClosingMeter) {
+          setPetrolOpeningMeter(formatTo4Decimals(lastEntry.petrolClosingMeter));
+          setPetrolAutoLoaded(true);
+        } else {
+          setPetrolOpeningMeter('');
+          setPetrolAutoLoaded(false);
+        }
+
+        if (lastEntry.dieselClosingMeter) {
+          setDieselOpeningMeter(formatTo4Decimals(lastEntry.dieselClosingMeter));
+          setDieselAutoLoaded(true);
+        } else {
+          setDieselOpeningMeter('');
+          setDieselAutoLoaded(false);
+        }
+
+        // In Shift 2+, testing is NOT applicable (testing is done only in morning Shift 1)
+        setPetrolTestingAlreadyDone(true);
+        setDieselTestingAlreadyDone(true);
+        setPetrolTestingQty('0');
+        setDieselTestingQty('0');
+
+        // Preload fuel rates from previous shift
+        if (lastEntry.petrolRate) setPetrolRate(String(lastEntry.petrolRate));
+        if (lastEntry.dieselRate) setDieselRate(String(lastEntry.dieselRate));
+      } else {
+        // Shift 1 (first shift of the day):
+        const cachedPetrol = (await AsyncStorage.getItem(`@meter_${machineId}_petrol`)) || (await AsyncStorage.getItem(`@meter_${activePNozzleId}`));
+        const cachedDiesel = (await AsyncStorage.getItem(`@meter_${machineId}_diesel`)) || (await AsyncStorage.getItem(`@meter_${activeDNozzleId}`));
+
+        if (cachedPetrol) {
+          setPetrolOpeningMeter(formatTo4Decimals(cachedPetrol));
+          setPetrolAutoLoaded(true);
+        } else if (pNozzle.currentMeterReading !== undefined && pNozzle.currentMeterReading !== null) {
+          setPetrolOpeningMeter(formatTo4Decimals(pNozzle.currentMeterReading));
+          setPetrolAutoLoaded(true);
+        } else {
+          setPetrolOpeningMeter('');
+          setPetrolAutoLoaded(false);
+        }
+
+        if (cachedDiesel) {
+          setDieselOpeningMeter(formatTo4Decimals(cachedDiesel));
+          setDieselAutoLoaded(true);
+        } else if (dNozzle.currentMeterReading !== undefined && dNozzle.currentMeterReading !== null) {
+          setDieselOpeningMeter(formatTo4Decimals(dNozzle.currentMeterReading));
+          setDieselAutoLoaded(true);
+        } else {
+          setDieselOpeningMeter('');
+          setDieselAutoLoaded(false);
+        }
+
+        setPetrolRate('');
+        setDieselRate('');
+        setPetrolTestingAlreadyDone(false);
+        setDieselTestingAlreadyDone(false);
+        setPetrolTestingQty('5');
+        setDieselTestingQty('5');
+      }
+
+      // 2. Check if this staff already submitted on this machine & date
+      if (staffId) {
+        await checkEditModeForStaffAndMachine(staffId, machineId, targetDate);
+      }
+    } catch (e) {
+      console.warn("Auto-carry reading error:", e);
+    }
+  };
+
+  const reloadSubmittedDataForDate = async (targetDate) => {
+    try {
+      const res = await getSubmittedReportsForDate(targetDate);
+      const map = {};
+      (res.reports || []).forEach(r => {
+        if (r.salesmanId) {
+          if (!map[r.salesmanId]) map[r.salesmanId] = [];
+          map[r.salesmanId].push(r);
+        }
+      });
+      setSubmittedSalesmenMap(map);
+
+      // Re-check edit mode if staff and machine are already selected
+      if (selectedSalesman && selectedMachine) {
+        checkEditModeForStaffAndMachine(selectedSalesman, selectedMachine, targetDate);
+      }
+    } catch (e) {
+      console.warn("Error reloading submitted data for date:", e);
+    }
+  };
+
+  const handleSelectDateMode = (mode) => {
+    setDateFilterMode(mode);
+    if (mode === 'today') {
+      const today = new Date();
+      setSelectedDate(today);
+      reloadSubmittedDataForDate(today);
+      if (selectedMachine) handleMachineChange(selectedMachine, today);
+    } else if (mode === 'yesterday') {
+      const yest = new Date();
+      yest.setDate(yest.getDate() - 1);
+      setSelectedDate(yest);
+      reloadSubmittedDataForDate(yest);
+      if (selectedMachine) handleMachineChange(selectedMachine, yest);
+    } else if (mode === 'custom') {
+      setShowDatePicker(true);
+    }
+  };
+
+  const handleCustomDateChange = (event, date) => {
+    setShowDatePicker(false);
+    if (date) {
+      setSelectedDate(date);
+      if (isDateToday(date)) {
+        setDateFilterMode('today');
+      } else if (isDateYesterday(date)) {
+        setDateFilterMode('yesterday');
+      } else {
+        setDateFilterMode('custom');
+      }
+      reloadSubmittedDataForDate(date);
+      if (selectedMachine) handleMachineChange(selectedMachine, date);
+    }
+  };
+
+  const handleSalesmanChange = async (staffId) => {
+    setSelectedSalesman(staffId);
+
+    // ALWAYS reset previous user inputs so previous staff's data is NEVER shown!
+    resetFormFields();
+
+    if (!staffId) return;
+
+    const sObj = effectiveSalesmen.find(s => s.id === staffId);
+    const t = (sObj?.staffType || '').toLowerCase();
+    const n = (sObj?.name || '').toLowerCase();
+    const isSupp = t === 'watchman' || t === 'sweeper' || 
+                   n.includes('चौकीदार') || n.includes('watchman') || n.includes('guard') ||
+                   n.includes('सफाई') || n.includes('sweeper') || n.includes('स्वीपर');
+    if (isSupp) {
+      setSelectedMachine('');
+      setSelectedMachineData(null);
+      setPetrolOpeningMeter('');
+      setDieselOpeningMeter('');
+      const defaultNotes = (t === 'watchman' || n.includes('चौकीदार'))
+        ? 'चौकीदार मानदेय / मजदूरी'
+        : 'सफाईकर्मी दैनिक मजदूरी';
+      setSupportNotes(defaultNotes);
+      loadSupportStaffAdvances(staffId, selectedDate, sObj?.name);
+    } else if (selectedMachine) {
+      // Re-run machine change for the currently selected machine with this newly selected staff
+      await handleMachineChange(selectedMachine, selectedDate, staffId);
+    }
+  };
 
   // Listeners on Mount
   useEffect(() => {
@@ -448,87 +1007,61 @@ export default function DailyEntryScreen({ navigation }) {
       (error) => console.warn("Udhari listener:", error.message)
     );
 
+    // Load submitted reports for current date
+    reloadSubmittedDataForDate(selectedDate);
+
+    const unsubSalesReports = onSnapshot(
+      collection(db, 'sales_reports'),
+      () => {
+        reloadSubmittedDataForDate(selectedDate);
+      },
+      (error) => console.warn("Sales reports listener:", error.message)
+    );
+
+    // Sync & listen to permanent digital payment modes
+    syncDefaultDigitalPaymentModes().catch(() => null);
+    const unsubPaymentModes = onSnapshot(
+      collection(db, 'digital_payment_modes'),
+      (snapshot) => {
+        let modes = [];
+        if (!snapshot.empty) {
+          snapshot.forEach(d => modes.push({ id: d.id, ...d.data() }));
+          modes.sort((a, b) => (a.order || 99) - (b.order || 99));
+        } else {
+          modes = DEFAULT_PERMANENT_DIGITAL_MODES;
+        }
+        setMasterDigitalModes(modes);
+
+        // Keep existing entered amounts while reflecting master list
+        setDigitalEntries(prevEntries => {
+          return modes.map(m => {
+            const found = prevEntries.find(e => e.id === m.id || e.modeId === m.modeId);
+            return {
+              ...m,
+              amount: found ? found.amount : ''
+            };
+          });
+        });
+      },
+      (error) => console.warn("Payment modes listener error:", error.message)
+    );
+
     return () => {
       unsubSalesmen();
       unsubMachines();
       unsubNozzles();
       unsubUdhari();
+      unsubSalesReports();
+      unsubPaymentModes();
     };
   }, []);
-
-  // Helper to check for existing entry today and populate Edit Mode
-  const checkEditModeForStaffAndMachine = async (salesmanId, machineId) => {
-    if (!salesmanId || !machineId) return;
-    try {
-      const existingEntry = await findTodayEntry(salesmanId, machineId);
-      if (existingEntry) {
-        setIsEditMode(true);
-        setExistingReportId(existingEntry.id);
-        setExistingReportData(existingEntry);
-
-        // Pre-fill meters
-        if (existingEntry.petrolOpeningMeter) setPetrolOpeningMeter(String(existingEntry.petrolOpeningMeter));
-        if (existingEntry.petrolClosingMeter) setPetrolClosingMeter(String(existingEntry.petrolClosingMeter));
-        if (existingEntry.dieselOpeningMeter) setDieselOpeningMeter(String(existingEntry.dieselOpeningMeter));
-        if (existingEntry.dieselClosingMeter) setDieselClosingMeter(String(existingEntry.dieselClosingMeter));
-
-        setPetrolTestingQty(String(existingEntry.petrolTesting ?? '5'));
-        setDieselTestingQty(String(existingEntry.dieselTesting ?? '5'));
-        if (existingEntry.petrolRate) setPetrolRate(String(existingEntry.petrolRate));
-        if (existingEntry.dieselRate) setDieselRate(String(existingEntry.dieselRate));
-
-        // Pre-fill payments
-        if (existingEntry.cashNotesAmount !== undefined) {
-          setCash(String(existingEntry.cashNotesAmount));
-        } else if (existingEntry.cashAmount) {
-          setCash(String(existingEntry.cashAmount));
-        }
-        if (existingEntry.coinsAmount !== undefined) {
-          setCoins(String(existingEntry.coinsAmount));
-        } else {
-          setCoins('');
-        }
-        setOnline(existingEntry.onlineAmount ? String(existingEntry.onlineAmount) : '');
-        setUdhari(existingEntry.udhariAmount ? String(existingEntry.udhariAmount) : '');
-        setExpense(existingEntry.expenses ? String(existingEntry.expenses) : '');
-
-        if (existingEntry.digitalPaymentsBreakdown && existingEntry.digitalPaymentsBreakdown.length > 0) {
-          setDigitalEntries(existingEntry.digitalPaymentsBreakdown);
-        }
-        if (existingEntry.cashBreakdown) {
-          setBreakdownData(existingEntry.cashBreakdown);
-          setIsCashMatched(true);
-        }
-        if (existingEntry.udhariBreakdown && existingEntry.udhariBreakdown.length > 0) {
-          setUdhariBreakdownData(existingEntry.udhariBreakdown);
-          setIsUdhariMatched(true);
-        }
-        if (existingEntry.expenseBreakdown && existingEntry.expenseBreakdown.length > 0) {
-          setExpenseBreakdownData(existingEntry.expenseBreakdown);
-          setIsExpenseMatched(true);
-        }
-
-        setIsFormClearedForFreshFill(false);
-        Alert.alert(
-          '⚠️ आज की एंट्री मिली! (Edit Mode)',
-          'इस मशीन पर आज की एंट्री पहले से दर्ज है। पूरा डेटा फॉर्म में लोड हो गया है। आप इसमें बदलाव कर सकते हैं या फ़ॉर्म खाली कर शुरू से भर सकते हैं। सबमिट करने पर Admin से 6-digit OTP लेना होगा।',
-          [{ text: 'समझ गया (OK)' }]
-        );
-      } else {
-        setIsEditMode(false);
-        setExistingReportId(null);
-        setExistingReportData(null);
-        setIsFormClearedForFreshFill(false);
-      }
-    } catch (err) {
-      console.warn('Edit check error:', err);
-    }
-  };
 
   // Staff chooses to fill from scratch instead of editing pre-filled values
   const handleStartFresh = () => {
     setPetrolClosingMeter('');
     setDieselClosingMeter('');
+    setPetrolOfficialTestingQty('0');
+    setDieselOfficialTestingQty('0');
     setCash('');
     setCoins('');
     setOnline('');
@@ -541,11 +1074,8 @@ export default function DailyEntryScreen({ navigation }) {
       notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
       coins20: '', coins10: '', coins5: '', coins2: '', coins1: ''
     });
-    setDigitalEntries([
-      { id: 'init_paytm', modeId: 'paytm', name: 'Paytm (पेटीएम)', amount: '' },
-      { id: 'init_phonepe', modeId: 'phonepe', name: 'PhonePe (फोनपे)', amount: '' },
-      { id: 'init_atm', modeId: 'atm', name: 'ATM / POS स्वाइप', amount: '' }
-    ]);
+    setDigitalEntries(masterDigitalModes.map(m => ({ ...m, amount: '' })));
+    setMobilEntries([]);
     setUdhariBreakdownData([{ id: Date.now().toString(), name: '', amount: '' }]);
     setUdhariReturnEntries([]);
     setExpenseBreakdownData([{ id: Date.now().toString(), type: 'general', reason: '', amount: '', salesmanId: '', salesmanName: '' }]);
@@ -567,8 +1097,10 @@ export default function DailyEntryScreen({ navigation }) {
     if (existingEntry.dieselOpeningMeter) setDieselOpeningMeter(String(existingEntry.dieselOpeningMeter));
     if (existingEntry.dieselClosingMeter) setDieselClosingMeter(String(existingEntry.dieselClosingMeter));
 
-    setPetrolTestingQty(String(existingEntry.petrolTesting ?? '5'));
-    setDieselTestingQty(String(existingEntry.dieselTesting ?? '5'));
+    setPetrolTestingQty(String(existingEntry.petrolNormalTesting ?? existingEntry.petrolTesting ?? '5'));
+    setPetrolOfficialTestingQty(String(existingEntry.petrolOfficialTesting ?? '0'));
+    setDieselTestingQty(String(existingEntry.dieselNormalTesting ?? existingEntry.dieselTesting ?? '5'));
+    setDieselOfficialTestingQty(String(existingEntry.dieselOfficialTesting ?? '0'));
     if (existingEntry.petrolRate) setPetrolRate(String(existingEntry.petrolRate));
     if (existingEntry.dieselRate) setDieselRate(String(existingEntry.dieselRate));
 
@@ -587,7 +1119,11 @@ export default function DailyEntryScreen({ navigation }) {
     setExpense(existingEntry.expenses ? String(existingEntry.expenses) : '');
 
     if (existingEntry.digitalPaymentsBreakdown && existingEntry.digitalPaymentsBreakdown.length > 0) {
-      setDigitalEntries(existingEntry.digitalPaymentsBreakdown);
+      setDigitalEntries(mergeDigitalEntriesWithBreakdown(existingEntry.digitalPaymentsBreakdown, existingEntry, masterDigitalModes));
+    } else if (existingEntry.paytmAmount || existingEntry.phonePeAmount || existingEntry.atmAmount || existingEntry.bobAmount) {
+      setDigitalEntries(mergeDigitalEntriesWithBreakdown([], existingEntry, masterDigitalModes));
+    } else {
+      setDigitalEntries(masterDigitalModes.map(m => ({ ...m, amount: '' })));
     }
     if (existingEntry.cashBreakdown) {
       setBreakdownData(existingEntry.cashBreakdown);
@@ -600,6 +1136,23 @@ export default function DailyEntryScreen({ navigation }) {
     if (existingEntry.expenseBreakdown && existingEntry.expenseBreakdown.length > 0) {
       setExpenseBreakdownData(existingEntry.expenseBreakdown);
       setIsExpenseMatched(true);
+    }
+    if (existingEntry.mobilEntries && existingEntry.mobilEntries.length > 0) {
+      setMobilEntries(existingEntry.mobilEntries.map(e => ({
+        id: e.id || Date.now().toString() + Math.random().toString(36).substr(2, 4),
+        packSize: e.packSize || '',
+        quantity: String(e.quantity || '1'),
+        amount: String(e.amount || '')
+      })));
+    } else if (existingEntry.totalMobilAmount) {
+      setMobilEntries([{
+        id: Date.now().toString(),
+        packSize: 'मोबिल',
+        quantity: String(existingEntry.totalMobilQty || '1'),
+        amount: String(existingEntry.totalMobilAmount)
+      }]);
+    } else {
+      setMobilEntries([]);
     }
     setIsFormClearedForFreshFill(false);
   };
@@ -618,8 +1171,10 @@ export default function DailyEntryScreen({ navigation }) {
       if (lastEntry.dieselOpeningMeter) setDieselOpeningMeter(String(lastEntry.dieselOpeningMeter));
       if (lastEntry.dieselClosingMeter) setDieselClosingMeter(String(lastEntry.dieselClosingMeter));
 
-      setPetrolTestingQty(String(lastEntry.petrolTesting ?? '0'));
-      setDieselTestingQty(String(lastEntry.dieselTesting ?? '0'));
+      setPetrolTestingQty(String(lastEntry.petrolNormalTesting ?? lastEntry.petrolTesting ?? '0'));
+      setPetrolOfficialTestingQty(String(lastEntry.petrolOfficialTesting ?? '0'));
+      setDieselTestingQty(String(lastEntry.dieselNormalTesting ?? lastEntry.dieselTesting ?? '0'));
+      setDieselOfficialTestingQty(String(lastEntry.dieselOfficialTesting ?? '0'));
       if (lastEntry.petrolRate) setPetrolRate(String(lastEntry.petrolRate));
       if (lastEntry.dieselRate) setDieselRate(String(lastEntry.dieselRate));
 
@@ -638,7 +1193,11 @@ export default function DailyEntryScreen({ navigation }) {
       setExpense(lastEntry.expenses ? String(lastEntry.expenses) : '');
 
       if (lastEntry.digitalPaymentsBreakdown && lastEntry.digitalPaymentsBreakdown.length > 0) {
-        setDigitalEntries(lastEntry.digitalPaymentsBreakdown);
+        setDigitalEntries(mergeDigitalEntriesWithBreakdown(lastEntry.digitalPaymentsBreakdown, lastEntry, masterDigitalModes));
+      } else if (lastEntry.paytmAmount || lastEntry.phonePeAmount || lastEntry.atmAmount || lastEntry.bobAmount) {
+        setDigitalEntries(mergeDigitalEntriesWithBreakdown([], lastEntry, masterDigitalModes));
+      } else {
+        setDigitalEntries(masterDigitalModes.map(m => ({ ...m, amount: '' })));
       }
       if (lastEntry.cashBreakdown) {
         setBreakdownData(lastEntry.cashBreakdown);
@@ -652,6 +1211,23 @@ export default function DailyEntryScreen({ navigation }) {
         setExpenseBreakdownData(lastEntry.expenseBreakdown);
         setIsExpenseMatched(true);
       }
+      if (lastEntry.mobilEntries && lastEntry.mobilEntries.length > 0) {
+        setMobilEntries(lastEntry.mobilEntries.map(e => ({
+          id: e.id || Date.now().toString() + Math.random().toString(36).substr(2, 4),
+          packSize: e.packSize || '',
+          quantity: String(e.quantity || '1'),
+          amount: String(e.amount || '')
+        })));
+      } else if (lastEntry.totalMobilAmount) {
+        setMobilEntries([{
+          id: Date.now().toString(),
+          packSize: 'मोबिल',
+          quantity: String(lastEntry.totalMobilQty || '1'),
+          amount: String(lastEntry.totalMobilAmount)
+        }]);
+      } else {
+        setMobilEntries([]);
+      }
       setIsFormClearedForFreshFill(false);
 
       Alert.alert(
@@ -663,149 +1239,16 @@ export default function DailyEntryScreen({ navigation }) {
 
   const handleSwitchToNewShift = () => {
     if (selectedMachine) {
-      handleMachineChange(selectedMachine);
-    }
-  };
-
-  // When Machine Changes: Auto-Carry Last Closing Meters!
-  const handleMachineChange = async (machineId) => {
-    setSelectedMachine(machineId);
-    if (!machineId) {
-      setSelectedMachineData(null);
-      setPetrolOpeningMeter('');
-      setDieselOpeningMeter('');
-      setPetrolClosingMeter('');
-      setDieselClosingMeter('');
-      return;
-    }
-
-    // Determine default nozzles according to DU1 (N1+N2), DU2 (N3+N4), DU3 (N5+N6)
-    const match = String(machineId).match(/\d+/);
-    const machNum = match ? parseInt(match[0], 10) : 1;
-    const defaultPNozzleId = `N${(machNum - 1) * 2 + 1}`;
-    const defaultDNozzleId = `N${(machNum - 1) * 2 + 2}`;
-
-    const mach = effectiveMachines.find(m => m.id === machineId) || { id: machineId, name: machineId };
-    setSelectedMachineData(mach);
-
-    const machNozzles = nozzlesList.filter(n => n.machineId === machineId || n.machineName === machineId);
-    
-    // Petrol nozzle detection
-    const pNozzle = machNozzles.find(n => n.fuelType === 'Petrol' || n.nozzleId === (mach.petrolNozzle || defaultPNozzleId)) || {
-      id: `${machineId}-${mach.petrolNozzle || defaultPNozzleId}`,
-      nozzleId: mach.petrolNozzle || defaultPNozzleId,
-      fuelType: 'Petrol',
-      fuelRate: '96.72',
-      currentMeterReading: '1933.9489'
-    };
-    const activePNozzleId = mach.petrolNozzle || pNozzle.nozzleId || defaultPNozzleId;
-    setCurrentPetrolNozzleId(activePNozzleId);
-
-    // Diesel nozzle detection
-    const dNozzle = machNozzles.find(n => n.fuelType === 'Diesel' || n.nozzleId === (mach.dieselNozzle || defaultDNozzleId)) || {
-      id: `${machineId}-${mach.dieselNozzle || defaultDNozzleId}`,
-      nozzleId: mach.dieselNozzle || defaultDNozzleId,
-      fuelType: 'Diesel',
-      fuelRate: '89.62',
-      currentMeterReading: '2450.1234'
-    };
-    const activeDNozzleId = mach.dieselNozzle || dNozzle.nozzleId || defaultDNozzleId;
-    setCurrentDieselNozzleId(activeDNozzleId);
-
-    try {
-      // 1. Fetch all today's entries for this machine to determine Shift Number & Last Closing
-      const entriesToday = await getTodayMachineEntries(machineId);
-      setTodayMachineEntries(entriesToday);
-      const computedShift = entriesToday.length + 1;
-      setShiftNumber(computedShift);
-
-      if (entriesToday.length > 0) {
-        // Shift 2 or subsequent shift:
-        // Automatically take the latest submitted entry's closing meter as opening meter!
-        const lastEntry = entriesToday[entriesToday.length - 1];
-        if (lastEntry.petrolClosingMeter) {
-          setPetrolOpeningMeter(formatTo4Decimals(lastEntry.petrolClosingMeter));
-          setPetrolAutoLoaded(true);
-        } else {
-          setPetrolOpeningMeter('1933.9489');
-          setPetrolAutoLoaded(false);
-        }
-
-        if (lastEntry.dieselClosingMeter) {
-          setDieselOpeningMeter(formatTo4Decimals(lastEntry.dieselClosingMeter));
-          setDieselAutoLoaded(true);
-        } else {
-          setDieselOpeningMeter('2450.1234');
-          setDieselAutoLoaded(false);
-        }
-
-        // In Shift 2+, testing is NOT applicable (testing is done only in morning Shift 1)
-        setPetrolTestingAlreadyDone(true);
-        setDieselTestingAlreadyDone(true);
-        setPetrolTestingQty('0');
-        setDieselTestingQty('0');
-
-        // Preload fuel rates from previous shift
-        if (lastEntry.petrolRate) setPetrolRate(String(lastEntry.petrolRate));
-        if (lastEntry.dieselRate) setDieselRate(String(lastEntry.dieselRate));
-
-        setPetrolClosingMeter('');
-        setDieselClosingMeter('');
-
-        // Ensure not in edit mode (it's a fresh Shift 2)
-        setIsEditMode(false);
-        setExistingReportId(null);
-        setExistingReportData(null);
-      } else {
-        // Shift 1 (first shift of the day):
-        const cachedPetrol = (await AsyncStorage.getItem(`@meter_${machineId}_petrol`)) || (await AsyncStorage.getItem(`@meter_${activePNozzleId}`));
-        const cachedDiesel = (await AsyncStorage.getItem(`@meter_${machineId}_diesel`)) || (await AsyncStorage.getItem(`@meter_${activeDNozzleId}`));
-
-        if (cachedPetrol) {
-          setPetrolOpeningMeter(formatTo4Decimals(cachedPetrol));
-          setPetrolAutoLoaded(true);
-        } else if (pNozzle.currentMeterReading !== undefined && pNozzle.currentMeterReading !== null) {
-          setPetrolOpeningMeter(formatTo4Decimals(pNozzle.currentMeterReading));
-          setPetrolAutoLoaded(true);
-        } else {
-          setPetrolOpeningMeter('1933.9489');
-          setPetrolAutoLoaded(false);
-        }
-
-        if (cachedDiesel) {
-          setDieselOpeningMeter(formatTo4Decimals(cachedDiesel));
-          setDieselAutoLoaded(true);
-        } else if (dNozzle.currentMeterReading !== undefined && dNozzle.currentMeterReading !== null) {
-          setDieselOpeningMeter(formatTo4Decimals(dNozzle.currentMeterReading));
-          setDieselAutoLoaded(true);
-        } else {
-          setDieselOpeningMeter('2450.1234');
-          setDieselAutoLoaded(false);
-        }
-
-        setPetrolRate('');
-        setDieselRate('');
-        setPetrolClosingMeter('');
-        setDieselClosingMeter('');
-
-        setPetrolTestingAlreadyDone(false);
-        setDieselTestingAlreadyDone(false);
-        setPetrolTestingQty('5');
-        setDieselTestingQty('5');
-
-        setIsEditMode(false);
-        setExistingReportId(null);
-        setExistingReportData(null);
-      }
-    } catch (e) {
-      console.warn("Auto-carry reading error:", e);
+      handleMachineChange(selectedMachine, selectedDate, selectedSalesman);
     }
   };
 
   // Calculations for Petrol (Tank 1)
   const pOpening = parseFloat(petrolOpeningMeter) || 0;
   const pClosing = parseFloat(petrolClosingMeter) || pOpening;
-  const pTesting = parseFloat(petrolTestingQty) || 0;
+  const pNormalTesting = parseFloat(petrolTestingQty) || 0;
+  const pOfficialTesting = parseFloat(petrolOfficialTestingQty) || 0;
+  const pTesting = pNormalTesting + pOfficialTesting;
   const pGross = Math.max(0, pClosing - pOpening);
   const pNetSold = Math.max(0, pGross - pTesting);
   const pRateVal = parseFloat(petrolRate) || 0;
@@ -814,17 +1257,21 @@ export default function DailyEntryScreen({ navigation }) {
   // Calculations for Diesel (Tank 2)
   const dOpening = parseFloat(dieselOpeningMeter) || 0;
   const dClosing = parseFloat(dieselClosingMeter) || dOpening;
-  const dTesting = parseFloat(dieselTestingQty) || 0;
+  const dNormalTesting = parseFloat(dieselTestingQty) || 0;
+  const dOfficialTesting = parseFloat(dieselOfficialTestingQty) || 0;
+  const dTesting = dNormalTesting + dOfficialTesting;
   const dGross = Math.max(0, dClosing - dOpening);
   const dNetSold = Math.max(0, dGross - dTesting);
   const dRateVal = parseFloat(dieselRate) || 0;
   const dExpected = dNetSold * dRateVal;
 
-  // Combined Machine Totals
+  // Combined Machine Totals & Additional Mobil Sales
   const totalLitersSold = pNetSold + dNetSold;
   const totalFuelAmount = pExpected + dExpected;
+  const totalMobilAmount = mobilEntries.reduce((sum, item) => sum + (parseFloat(item.amount) || 0), 0);
+  const totalMobilQty = mobilEntries.reduce((sum, item) => sum + (parseInt(item.quantity, 10) || (parseFloat(item.amount) > 0 ? 1 : 0)), 0);
   const udhariReturnTotal = calculateReturnTotal();
-  const totalExpectedAmount = totalFuelAmount + udhariReturnTotal;
+  const totalExpectedAmount = totalFuelAmount + totalMobilAmount + udhariReturnTotal;
 
   // Combined Collections
   const cashNotesAmt = parseFloat(cash) || 0;
@@ -991,13 +1438,38 @@ export default function DailyEntryScreen({ navigation }) {
     const machineName = selectedMachineData?.name || selectedMachine;
 
     // Filter filled digital modes
-    const activeDigitalModes = digitalEntries.filter(e => parseFloat(e.amount) > 0);
+    const activeDigitalModes = digitalEntries
+      .filter(e => parseFloat(e.amount) > 0)
+      .map(e => ({
+        ...e,
+        name: (e.name && e.name.trim()) ? e.name.trim() : (e.isCustom ? 'Other Digital' : e.name)
+      }));
     const getModeSum = (mId) => activeDigitalModes.filter(e => e.modeId === mId).reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
     const customSum = activeDigitalModes.filter(e => e.isCustom).reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
 
     const validNewUdhari = udhariBreakdownData.filter(e => (e.name || '').trim() && parseFloat(e.amount) > 0);
     const validReturns = udhariReturnEntries.filter(e => parseFloat(e.amountReturned) > 0);
     const returnTotal = calculateReturnTotal();
+
+    const activeMobilEntries = mobilEntries
+      .filter(e => parseFloat(e.amount) > 0)
+      .map(e => ({
+        id: e.id,
+        packSize: (e.packSize || '').trim() || 'मोबिल',
+        quantity: parseInt(e.quantity, 10) || 1,
+        amount: parseFloat(e.amount) || 0
+      }));
+    const finalTotalMobilAmount = activeMobilEntries.reduce((s, e) => s + e.amount, 0);
+    const finalTotalMobilQty = activeMobilEntries.reduce((s, e) => s + e.quantity, 0);
+
+    // Compute entry timestamp according to selectedDate
+    const submissionDate = new Date(selectedDate);
+    const now = new Date();
+    if (isDateToday(selectedDate)) {
+      submissionDate.setHours(now.getHours(), now.getMinutes(), now.getSeconds());
+    } else {
+      submissionDate.setHours(20, 0, 0);
+    }
 
     const dbPayload = {
       machineId: selectedMachine,
@@ -1011,6 +1483,8 @@ export default function DailyEntryScreen({ navigation }) {
         openingMeterReading: petrolOpeningMeter.trim(),
         closingMeterReading: petrolClosingMeter.trim(),
         testingQuantity: pTesting,
+        normalTesting: pNormalTesting,
+        officialTesting: pOfficialTesting,
         fuelRate: pRateVal,
         totalQuantitySold: pNetSold,
         expectedAmount: pExpected,
@@ -1023,11 +1497,25 @@ export default function DailyEntryScreen({ navigation }) {
         openingMeterReading: dieselOpeningMeter.trim(),
         closingMeterReading: dieselClosingMeter.trim(),
         testingQuantity: dTesting,
+        normalTesting: dNormalTesting,
+        officialTesting: dOfficialTesting,
         fuelRate: dRateVal,
         totalQuantitySold: dNetSold,
         expectedAmount: dExpected,
         tankId: 'Tank-2'
       },
+
+      // Additional Mobil Sale
+      totalMobilAmount: finalTotalMobilAmount,
+      totalMobilQty: finalTotalMobilQty,
+      mobilEntries: activeMobilEntries,
+
+      petrolTesting: pTesting,
+      petrolNormalTesting: pNormalTesting,
+      petrolOfficialTesting: pOfficialTesting,
+      dieselTesting: dTesting,
+      dieselNormalTesting: dNormalTesting,
+      dieselOfficialTesting: dOfficialTesting,
 
       cashAmount: cashAmt,
       cashNotesAmount: cashNotesAmt,
@@ -1040,6 +1528,7 @@ export default function DailyEntryScreen({ navigation }) {
       paytmAmount: getModeSum('paytm'),
       phonePeAmount: getModeSum('phonepe'),
       atmAmount: getModeSum('atm'),
+      bobAmount: getModeSum('bob'),
       extraPowerAmount: getModeSum('extrapower'),
       extraRewardAmount: getModeSum('extrareward'),
       debitCardAmount: getModeSum('debit_card'),
@@ -1060,30 +1549,37 @@ export default function DailyEntryScreen({ navigation }) {
       expenseBreakdown: expenseAmt > 0 ? expenseBreakdownData : null,
       totalPayment: totalCollection,
       shortageOrExcess,
-      shiftNumber: Number(shiftNumber) || 1,
-      shiftLabel: `Shift ${Number(shiftNumber) || 1}`,
-      entryDate: new Date()
+      shiftNumber: (pTesting > 0 || dTesting > 0) ? 1 : 2,
+      shiftLabel: (pTesting > 0 || dTesting > 0) ? 'Shift 1' : 'Shift 2',
+      entryDate: submissionDate
     };
 
     const pdfPayload = {
       staffName,
       machineName,
-      shiftNumber: Number(shiftNumber) || 1,
-      shiftLabel: `Shift ${Number(shiftNumber) || 1}`,
+      shiftNumber: (pTesting > 0 || dTesting > 0) ? 1 : 2,
+      shiftLabel: (pTesting > 0 || dTesting > 0) ? 'Shift 1' : 'Shift 2',
       petrolNozzleId: currentPetrolNozzleId,
       dieselNozzleId: currentDieselNozzleId,
       petrolOpening: petrolOpeningMeter.trim(),
       petrolClosing: petrolClosingMeter.trim(),
       petrolTesting: pTesting,
+      petrolNormalTesting: pNormalTesting,
+      petrolOfficialTesting: pOfficialTesting,
       petrolNetSold: pNetSold,
       petrolRate: pRateVal,
       petrolExpected: pExpected,
       dieselOpening: dieselOpeningMeter.trim(),
       dieselClosing: dieselClosingMeter.trim(),
       dieselTesting: dTesting,
+      dieselNormalTesting: dNormalTesting,
+      dieselOfficialTesting: dOfficialTesting,
       dieselNetSold: dNetSold,
       dieselRate: dRateVal,
       dieselExpected: dExpected,
+      totalMobilAmount: finalTotalMobilAmount,
+      totalMobilQty: finalTotalMobilQty,
+      mobilEntries: activeMobilEntries,
       totalLitersSold,
       totalExpectedAmount,
       cashAmt,
@@ -1099,55 +1595,41 @@ export default function DailyEntryScreen({ navigation }) {
       shortageOrExcess,
       udhariReturnTotal: returnTotal,
       udhariReturnEntries: validReturns,
-      entryDate: new Date()
+      entryDate: submissionDate
     };
 
     return { staffName, machineName, dbPayload, pdfPayload, activeDigitalModes, validNewUdhari, validReturns, returnTotal };
   };
 
-  const resetFormAfterSubmit = (closingP, closingD) => {
-    setPetrolOpeningMeter(closingP || petrolClosingMeter.trim());
-    setDieselOpeningMeter(closingD || dieselClosingMeter.trim());
-    setPetrolClosingMeter('');
-    setDieselClosingMeter('');
-    
-    // Advance to next shift!
-    setShiftNumber(prev => prev + 1);
-    setPetrolTestingQty('0');
-    setDieselTestingQty('0');
-    setPetrolTestingAlreadyDone(true);
-    setDieselTestingAlreadyDone(true);
+  const refreshScreenCompletely = () => {
+    // 1. Reset staff and machine selections
+    setSelectedSalesman('');
+    setSelectedMachine('');
+    setSelectedMachineData(null);
+    setShiftNumber(1);
 
-    setPetrolRate('');
-    setDieselRate('');
-    setPetrolAutoLoaded(true);
-    setDieselAutoLoaded(true);
+    // 2. Reset opening meters
+    setPetrolOpeningMeter('');
+    setDieselOpeningMeter('');
 
-    setIsEditMode(false);
-    setExistingReportId(null);
-    setExistingReportData(null);
-    setIsFormClearedForFreshFill(false);
+    // 3. Reset all user input form fields
+    resetFormFields();
 
-    setCash('');
-    setCoins('');
-    setOnline('');
-    setUdhari('');
-    setExpense('');
-    setIsCashMatched(false);
-    setIsUdhariMatched(false);
-    setIsExpenseMatched(false);
-    setBreakdownData({
-      notes500: '', notes200: '', notes100: '', notes50: '', notes20: '', notes10: '',
-      coins20: '', coins10: '', coins5: '', coins2: '', coins1: ''
-    });
-    setDigitalEntries([
-      { id: 'init_paytm', modeId: 'paytm', name: 'Paytm (पेटीएम)', amount: '' },
-      { id: 'init_phonepe', modeId: 'phonepe', name: 'PhonePe (फोनपे)', amount: '' },
-      { id: 'init_atm', modeId: 'atm', name: 'ATM / POS स्वाइप', amount: '' }
-    ]);
-    setUdhariBreakdownData([{ id: Date.now().toString(), name: '', amount: '' }]);
-    setUdhariReturnEntries([]);
-    setExpenseBreakdownData([{ id: Date.now().toString(), type: 'general', reason: '', amount: '', salesmanId: '', salesmanName: '' }]);
+    // 4. Reset support staff fields
+    setSupportAmt('');
+    setSupportNotes('');
+
+    // 5. Reload submitted reports map for the selected date
+    reloadSubmittedDataForDate(selectedDate);
+
+    // 6. Scroll back to top
+    if (scrollViewRef.current) {
+      scrollViewRef.current.scrollTo({ y: 0, animated: true });
+    }
+  };
+
+  const resetFormAfterSubmit = () => {
+    refreshScreenCompletely();
   };
 
   // Form Submit Handler (Normal or triggers OTP modal if in Edit Mode)
@@ -1280,18 +1762,30 @@ export default function DailyEntryScreen({ navigation }) {
         await recordStaffSalaryAdvances(validSalaryAdvances, reportId, selectedMachine, machineName);
       }
 
-      const savedClosingP = petrolClosingMeter.trim();
-      const savedClosingD = dieselClosingMeter.trim();
+      // First refresh screen completely & scroll to top
+      refreshScreenCompletely();
 
-      // Immediately generate & download/share the PDF receipt right after DB save!
-      await generateAndSharePdf(pdfPayload);
-
-      // Reset the form
-      resetFormAfterSubmit(savedClosingP, savedClosingD);
-
+      // Show clear confirmation alert with PDF share option
       Alert.alert(
-        'सफलतापूर्वक दर्ज हुआ! ✅',
-        `स्टाफ: ${staffName}\nमशीन: ${machineName}\n\nडेटाबेस में बिक्री सुरक्षित दर्ज हो गई और PDF रसीद डाउनलोड/शेयर के लिए तैयार हो गई है.`
+        'आपकी एंट्री सबमिट हो गई है! ✅',
+        `स्टाफ: ${staffName}\nमशीन: ${machineName}\n\nदैनिक बिक्री डेटा सफलतापूर्वक दर्ज हो गया है और स्क्रीन रीफ्रेश हो गई है।`,
+        [
+          {
+            text: '📄 PDF रसीद देखें / शेयर करें',
+            onPress: async () => {
+              try {
+                await generateAndSharePdf(pdfPayload);
+              } catch (pdfErr) {
+                console.warn('PDF Share Error:', pdfErr);
+              }
+            }
+          },
+          {
+            text: 'ठीक है (OK)',
+            style: 'default'
+          }
+        ],
+        { cancelable: false }
       );
     } catch (err) {
       console.error(err);
@@ -1345,21 +1839,32 @@ export default function DailyEntryScreen({ navigation }) {
         await recordStaffSalaryAdvances(validSalaryAdvances, existingReportId, selectedMachine, machineName);
       }
 
-      const savedClosingP = petrolClosingMeter.trim();
-      const savedClosingD = dieselClosingMeter.trim();
-
       setOtpModalVisible(false);
       setOtpInput('');
 
-      // Immediately generate & download/share the updated PDF receipt right after DB update!
-      await generateAndSharePdf(pdfPayload);
-
-      // Reset the form
-      resetFormAfterSubmit(savedClosingP, savedClosingD);
+      // Refresh screen completely & scroll to top
+      refreshScreenCompletely();
 
       Alert.alert(
-        'सफलतापूर्वक संशोधित! ✅',
-        `Admin OTP सत्यापित हुआ। डेटाबेस में संशोधित बिक्री अपडेट हो गई और PDF रसीद तैयार हो गई है.`
+        'आपकी एंट्री संशोधित/सबमिट हो गई है! ✅',
+        `Admin OTP सत्यापित हुआ। डेटाबेस में संशोधित बिक्री अपडेट हो गई है और स्क्रीन रीफ्रेश हो गई है।`,
+        [
+          {
+            text: '📄 PDF रसीद देखें / शेयर करें',
+            onPress: async () => {
+              try {
+                await generateAndSharePdf(pdfPayload);
+              } catch (pdfErr) {
+                console.warn('PDF Share Error:', pdfErr);
+              }
+            }
+          },
+          {
+            text: 'ठीक है (OK)',
+            style: 'default'
+          }
+        ],
+        { cancelable: false }
       );
     } catch (err) {
       console.error('Edit submit error:', err);
@@ -1379,30 +1884,49 @@ export default function DailyEntryScreen({ navigation }) {
     await generateAndSharePdf(pdfPayload);
   };
 
-  const renderBreakdownInput = (key, label) => (
-    <View style={styles.breakdownInputWrapper} key={key}>
-      <Text style={styles.breakdownInputLabel}>{label}</Text>
-      <View style={{flexDirection: 'row', alignItems: 'center'}}>
-        <Text style={{marginRight: 5, color: '#555', fontWeight: 'bold'}}>x</Text>
-        <CustomInput 
-          keyboardType="numeric" 
-          value={breakdownData[key]} 
-          onChangeText={(t) => handleBreakdownChange(key, t)} 
-          placeholder="0" 
-          style={{marginBottom: 0, flex: 1}} 
-          inputStyle={{padding: 8, height: 40}}
-        />
+  const renderBreakdownInput = (key, label) => {
+    const count = parseInt(breakdownData[key], 10) || 0;
+    const unitVal = parseInt(key.replace(/[^0-9]/g, ''), 10) || 0;
+    const rowTotal = count * unitVal;
+
+    return (
+      <View style={styles.breakdownInputWrapper} key={key}>
+        <View style={styles.breakdownLabelBadge}>
+          <Text style={styles.breakdownInputLabel}>{label}</Text>
+        </View>
+        <Text style={styles.breakdownMultiply}>×</Text>
+        <View style={styles.breakdownInputContainer}>
+          <TextInput
+            style={styles.breakdownTextInput}
+            keyboardType="numeric"
+            value={breakdownData[key]}
+            onChangeText={(t) => handleBreakdownChange(key, t)}
+            placeholder="0"
+            placeholderTextColor="#94A3B8"
+            selectTextOnFocus
+          />
+        </View>
+        <Text style={styles.breakdownEqual}>=</Text>
+        <View style={styles.breakdownTotalBadge}>
+          <Text style={[styles.breakdownTotalText, rowTotal > 0 && { color: '#003C8F' }]}>
+            ₹{rowTotal.toLocaleString('en-IN')}
+          </Text>
+        </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['bottom']}>
       <KeyboardAvoidingView 
         behavior={Platform.OS === 'ios' ? 'padding' : undefined} 
         style={{ flex: 1 }}
       >
-        <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
+        <ScrollView 
+          ref={scrollViewRef}
+          contentContainerStyle={styles.scrollContent} 
+          keyboardShouldPersistTaps="handled"
+        >
           
           {/* Header Banner */}
           <View style={styles.header}>
@@ -1415,6 +1939,79 @@ export default function DailyEntryScreen({ navigation }) {
             </View>
           </View>
 
+          {/* Top Date Selection Card (Today, Yesterday, Last Dates) */}
+          <View style={styles.dateSelectorCard}>
+            <View style={styles.dateSelectorHeader}>
+              <View style={{flexDirection: 'row', alignItems: 'center', flexShrink: 1, marginRight: 8}}>
+                <Icon name="calendar" size={18} color="#003C8F" style={{marginRight: 6}} />
+                <Text style={styles.dateSelectorTitle} numberOfLines={1}>एंट्री की तारीख (Entry Date):</Text>
+              </View>
+              <Text style={styles.dateDisplayBadge}>
+                {selectedDate.toLocaleDateString('hi-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+              </Text>
+            </View>
+
+            {/* Quick Pills: Today / Yesterday / Other Date */}
+            <View style={styles.datePillsRow}>
+              <TouchableOpacity
+                style={[styles.datePill, dateFilterMode === 'today' && styles.datePillActive]}
+                onPress={() => handleSelectDateMode('today')}
+              >
+                <Icon 
+                  name="today" 
+                  size={15} 
+                  color={dateFilterMode === 'today' ? '#FFFFFF' : '#003C8F'} 
+                  style={{marginRight: 4}} 
+                />
+                <Text style={[styles.datePillText, dateFilterMode === 'today' && styles.datePillTextActive]}>
+                  आज (Today)
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.datePill, dateFilterMode === 'yesterday' && styles.datePillActive]}
+                onPress={() => handleSelectDateMode('yesterday')}
+              >
+                <Icon 
+                  name="play-back" 
+                  size={15} 
+                  color={dateFilterMode === 'yesterday' ? '#FFFFFF' : '#003C8F'} 
+                  style={{marginRight: 4}} 
+                />
+                <Text style={[styles.datePillText, dateFilterMode === 'yesterday' && styles.datePillTextActive]}>
+                  कल (Yesterday)
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.datePill, dateFilterMode === 'custom' && styles.datePillActive]}
+                onPress={() => handleSelectDateMode('custom')}
+              >
+                <Icon 
+                  name="calendar-number" 
+                  size={15} 
+                  color={dateFilterMode === 'custom' ? '#FFFFFF' : '#003C8F'} 
+                  style={{marginRight: 4}} 
+                />
+                <Text style={[styles.datePillText, dateFilterMode === 'custom' && styles.datePillTextActive]}>
+                  {dateFilterMode === 'custom'
+                    ? selectedDate.toLocaleDateString('hi-IN', { day: 'numeric', month: 'short' })
+                    : 'तारीख चुनें...'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {showDatePicker && (
+              <DateTimePicker
+                value={selectedDate}
+                mode="date"
+                display="default"
+                maximumDate={new Date()}
+                onChange={handleCustomDateChange}
+              />
+            )}
+          </View>
+
           {/* 1. Selection Section */}
           <View style={styles.formCard}>
             <Text style={styles.label}>1. अपना नाम चुनें (Select Staff Name) *</Text>
@@ -1422,67 +2019,302 @@ export default function DailyEntryScreen({ navigation }) {
               <Picker
                 selectedValue={selectedSalesman}
                 onValueChange={(val) => {
-                  setSelectedSalesman(val);
+                  handleSalesmanChange(val);
                 }}
-                style={styles.picker}
+                style={[styles.picker, { color: '#0F172A', backgroundColor: '#FFFFFF' }]}
                 dropdownIconColor="#003C8F"
                 itemStyle={{ color: '#0F172A', fontSize: 15 }}
                 mode="dropdown"
               >
-                <Picker.Item label="-- स्टाफ का नाम चुनें --" value="" color="#64748B" />
-                {effectiveSalesmen.map(s => (
-                  <Picker.Item key={s.id} label={`👤 ${s.name}`} value={s.id} color="#0F172A" />
-                ))}
-              </Picker>
-            </View>
-            {selectedSalesman ? (
-              <View style={styles.selectedIndicatorBadge}>
-                <Icon name="checkmark-circle" size={14} color="#16A34A" />
-                <Text style={styles.selectedIndicatorText}>
-                  चयनित स्टाफ: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveSalesmen.find(s => s.id === selectedSalesman)?.name || 'Staff'}</Text>
-                </Text>
-              </View>
-            ) : null}
-
-            <Text style={[styles.label, { marginTop: 12 }]}>2. अपनी मशीन चुनें (Select Machine) *</Text>
-            <View style={styles.pickerContainer}>
-              <Picker
-                selectedValue={selectedMachine}
-                onValueChange={handleMachineChange}
-                style={styles.picker}
-                dropdownIconColor="#003C8F"
-                itemStyle={{ color: '#0F172A', fontSize: 15 }}
-                mode="dropdown"
-              >
-                <Picker.Item label="-- डिस्पेंसर मशीन चुनें --" value="" color="#64748B" />
-                {effectiveMachines.map(m => {
-                  const match = String(m.name || m.id || '').match(/\d+/);
-                  const num = match ? parseInt(match[0], 10) : 1;
-                  const pNz = m.petrolNozzle || `N${(num - 1) * 2 + 1}`;
-                  const dNz = m.dieselNozzle || `N${(num - 1) * 2 + 2}`;
-                  const displayName = m.name || m.id;
+                <Picker.Item 
+                  label="-- स्टाफ का नाम चुनें --" 
+                  value="" 
+                  color="#64748B" 
+                  style={{ color: '#64748B', backgroundColor: '#FFFFFF' }}
+                />
+                {effectiveSalesmen.map(s => {
+                  const hasSubmitted = Boolean(submittedSalesmenMap[s.id] && submittedSalesmenMap[s.id].length > 0);
+                  const rolePrefix = s.staffType === 'watchman' ? '🛡️ ' : (s.staffType === 'sweeper' ? '🧹 ' : '👤 ');
+                  const roleSuffix = s.staffType === 'watchman' ? ' [चौकीदार]' : (s.staffType === 'sweeper' ? ' [सफाईकर्मी]' : '');
                   return (
                     <Picker.Item 
-                      key={m.id} 
-                      label={`⛽ ${displayName} (${pNz} Petrol • ${dNz} Diesel)`} 
-                      value={m.id} 
-                      color="#0F172A"
+                      key={s.id} 
+                      label={hasSubmitted ? `✓ ${s.name}${roleSuffix} (दर्ज / Submitted)` : `${rolePrefix}${s.name}${roleSuffix}`} 
+                      value={s.id} 
+                      color={hasSubmitted ? '#94A3B8' : '#0F172A'} 
+                      style={{ 
+                        color: hasSubmitted ? '#94A3B8' : '#0F172A', 
+                        backgroundColor: hasSubmitted ? '#F8FAFC' : '#FFFFFF' 
+                      }}
                     />
                   );
                 })}
               </Picker>
             </View>
-            {selectedMachine ? (
-              <View style={styles.selectedIndicatorBadge}>
-                <Icon name="checkmark-circle" size={14} color="#16A34A" />
+            {effectiveSalesmen.length === 0 && (
+              <Text style={{ color: '#EF4444', fontSize: 12, marginTop: 4 }}>
+                ⚠️ कोई स्टाफ उपलब्ध नहीं है। कृपया पहले Owner App से नया स्टाफ रजिस्टर करें।
+              </Text>
+            )}
+            {selectedSalesman ? (
+              <View style={[
+                styles.selectedIndicatorBadge,
+                submittedSalesmenMap[selectedSalesman]?.length > 0 && { backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }
+              ]}>
+                <Icon 
+                  name={submittedSalesmenMap[selectedSalesman]?.length > 0 ? "alert-circle" : "checkmark-circle"} 
+                  size={14} 
+                  color={submittedSalesmenMap[selectedSalesman]?.length > 0 ? "#D97706" : "#16A34A"} 
+                />
                 <Text style={styles.selectedIndicatorText}>
-                  चयनित मशीन: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveMachines.find(m => m.id === selectedMachine)?.name || selectedMachine}</Text>
+                  चयनित स्टाफ: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveSalesmen.find(s => s.id === selectedSalesman)?.name || 'Staff'}</Text>
+                  {submittedSalesmenMap[selectedSalesman]?.length > 0 && (
+                    <Text style={{ color: '#B45309', fontWeight: 'bold' }}> (⚠️ इस तारीख को डेटा दर्ज है)</Text>
+                  )}
                 </Text>
               </View>
             ) : null}
+
+            {/* STEP 2: Only shown for regular Salesmen (Machines & Meters) */}
+            {!isSupportStaff && (
+              <>
+                <Text style={[styles.label, { marginTop: 12 }]}>2. अपनी मशीन चुनें (Select Machine) *</Text>
+                <View style={styles.pickerContainer}>
+                  <Picker
+                    selectedValue={selectedMachine}
+                    onValueChange={(val) => handleMachineChange(val)}
+                    style={[styles.picker, { color: '#0F172A', backgroundColor: '#FFFFFF' }]}
+                    dropdownIconColor="#003C8F"
+                    itemStyle={{ color: '#0F172A', fontSize: 15 }}
+                    mode="dropdown"
+                  >
+                    <Picker.Item 
+                      label="-- डिस्पेंसर मशीन चुनें --" 
+                      value="" 
+                      color="#64748B" 
+                      style={{ color: '#64748B', backgroundColor: '#FFFFFF' }}
+                    />
+                    {effectiveMachines.map(m => {
+                      const match = String(m.name || m.id || '').match(/\d+/);
+                      const num = match ? parseInt(match[0], 10) : 1;
+                      const pNz = m.petrolNozzle || `N${(num - 1) * 2 + 1}`;
+                      const dNz = m.dieselNozzle || `N${(num - 1) * 2 + 2}`;
+                      const displayName = m.name || m.id;
+                      return (
+                        <Picker.Item 
+                          key={m.id} 
+                          label={`⛽ ${displayName} (${pNz} Petrol • ${dNz} Diesel)`} 
+                          value={m.id} 
+                          color="#0F172A"
+                          style={{ color: '#0F172A', backgroundColor: '#FFFFFF' }}
+                        />
+                      );
+                    })}
+                  </Picker>
+                </View>
+                {effectiveMachines.length === 0 && (
+                  <Text style={{ color: '#EF4444', fontSize: 12, marginTop: 4 }}>
+                    ⚠️ कोई मशीन उपलब्ध नहीं है। कृपया पहले Owner App (Settings) से डिस्पेंसर मशीन जोड़ें।
+                  </Text>
+                )}
+                {selectedMachine ? (
+                  <View style={styles.selectedIndicatorBadge}>
+                    <Icon name="checkmark-circle" size={14} color="#16A34A" />
+                    <Text style={styles.selectedIndicatorText}>
+                      चयनित मशीन: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveMachines.find(m => m.id === selectedMachine)?.name || selectedMachine}</Text>
+                    </Text>
+                  </View>
+                ) : null}
+              </>
+            )}
           </View>
 
-          {/* Shift Indicator Card */}
+          {/* NON-DISPENSER SUPPORT STAFF PAYMENT CARD (Chaukidaar / Sweeper) */}
+          {isSupportStaff && selectedSalesman ? (
+            <View style={[styles.sectionCard, { borderLeftColor: (selectedStaffObj?.staffType === 'watchman' || selectedStaffObj?.name?.toLowerCase().includes('चौकीदार')) ? '#1E40AF' : '#065F46', borderLeftWidth: 5, marginTop: 14 }]}>
+              {/* Header */}
+              <View style={styles.supportStaffHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                  <Icon 
+                    name={(selectedStaffObj?.staffType === 'watchman' || selectedStaffObj?.name?.toLowerCase().includes('चौकीदार')) ? "shield-checkmark" : "brush"} 
+                    size={24} 
+                    color={(selectedStaffObj?.staffType === 'watchman' || selectedStaffObj?.name?.toLowerCase().includes('चौकीदार')) ? "#1E40AF" : "#065F46"} 
+                    style={{ marginRight: 8 }} 
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.supportStaffTitle, { color: (selectedStaffObj?.staffType === 'watchman' || selectedStaffObj?.name?.toLowerCase().includes('चौकीदार')) ? "#1E40AF" : "#065F46" }]}>
+                      {(selectedStaffObj?.staffType === 'watchman' || selectedStaffObj?.name?.toLowerCase().includes('चौकीदार')) ? '🛡️ चौकीदार (Watchman) — मजदूरी / मानदेय' : '🧹 सफाईकर्मी (Sweeper) — मजदूरी / वेतन'}
+                    </Text>
+                    <Text style={styles.supportStaffSub}>
+                      गैर-डिस्पेंसर कर्मचारी भुगतान (सीधे खर्चों में दर्ज होगा)
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Staff Details Banner */}
+              <View style={styles.supportInfoBanner}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text style={styles.supportInfoName}>{selectedStaffObj?.name}</Text>
+                  <Text style={styles.supportInfoDate}>
+                    {selectedDate.toLocaleDateString('hi-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                  </Text>
+                </View>
+                {selectedStaffObj?.phone ? (
+                  <Text style={styles.supportInfoPhone}>📱 {selectedStaffObj.phone}</Text>
+                ) : null}
+              </View>
+
+              {/* Previous Advances / Month Total ("जहाँ से कितना पैसा लिए हैं वो दिख सके") */}
+              <View style={styles.supportHistoryBox}>
+                <View style={styles.supportHistoryHeader}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Icon name="time-outline" size={17} color="#B45309" style={{ marginRight: 5 }} />
+                    <Text style={styles.supportHistoryTitle}>इस महीने लिए गए पैसों का हिसाब:</Text>
+                  </View>
+                  <TouchableOpacity onPress={() => loadSupportStaffAdvances(selectedSalesman, selectedDate, selectedStaffObj?.name)}>
+                    <Icon name="refresh-outline" size={16} color="#003C8F" />
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.supportMonthTotalBanner}>
+                  <View>
+                    <Text style={styles.supportMonthTotalLabel}>इस महीने कुल लिया गया पैसा:</Text>
+                    <Text style={styles.supportMonthTotalVal}>₹{supportMonthTotal.toLocaleString('en-IN')}</Text>
+                  </View>
+                  <View style={styles.supportCountBadge}>
+                    <Text style={styles.supportCountBadgeText}>{supportAdvanceHistory.length} बार भुगतान</Text>
+                  </View>
+                </View>
+
+                {/* Itemized List of Past Advances for this staff */}
+                {supportHistoryLoading ? (
+                  <View style={{ paddingVertical: 12, alignItems: 'center' }}>
+                    <ActivityIndicator size="small" color="#003C8F" />
+                  </View>
+                ) : supportAdvanceHistory.length === 0 ? (
+                  <View style={styles.supportEmptyHistory}>
+                    <Icon name="checkmark-done-circle-outline" size={18} color="#16A34A" />
+                    <Text style={styles.supportEmptyHistoryText}>इस महीने अभी तक कोई पिछला भुगतान दर्ज नहीं है।</Text>
+                  </View>
+                ) : (
+                  <View style={styles.supportHistoryList}>
+                    {supportAdvanceHistory.map((item, idx) => {
+                      const dateStr = item.date || (item.timestamp?.toDate ? item.timestamp.toDate().toLocaleDateString('hi-IN', { day: '2-digit', month: 'short' }) : 'पूर्व भुगतान');
+                      return (
+                        <View key={item.id || idx} style={styles.supportHistoryRow}>
+                          <View style={{ flex: 1 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                              <Text style={styles.supportHistoryDate}>📅 {dateStr}</Text>
+                              {item.paymentMode ? (
+                                <View style={styles.supportHistoryModeBadge}>
+                                  <Text style={styles.supportHistoryModeText}>{item.paymentMode}</Text>
+                                </View>
+                              ) : null}
+                            </View>
+                            <Text style={styles.supportHistoryNotes} numberOfLines={1}>
+                              {item.notes || 'मजदूरी / मानदेय'}
+                            </Text>
+                          </View>
+                          <Text style={styles.supportHistoryAmt}>₹{Number(item.amount || 0).toLocaleString('en-IN')}</Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                )}
+              </View>
+
+              {/* New Payment Entry Form */}
+              <View style={styles.supportEntryForm}>
+                <Text style={styles.supportEntryTitle}>💰 नया भुगतान दर्ज करें (Enter Payment):</Text>
+
+                {/* Amount input */}
+                <CustomInput 
+                  label="भुगतान राशि (Payment Amount ₹) *" 
+                  keyboardType="numeric" 
+                  value={supportAmt} 
+                  onChangeText={(t) => setSupportAmt(sanitizeDecimalInput(t))} 
+                  leftIcon="cash-outline" 
+                  placeholder="0.00"
+                />
+
+                {/* Quick Amount Chips */}
+                <View style={styles.quickChipsRow}>
+                  {['100', '200', '500', '1000', '2000', '5000'].map(chipVal => (
+                    <TouchableOpacity
+                      key={chipVal}
+                      style={styles.quickChipBtn}
+                      onPress={() => {
+                        const cur = parseFloat(supportAmt) || 0;
+                        setSupportAmt(String(cur + parseInt(chipVal, 10)));
+                      }}
+                    >
+                      <Text style={styles.quickChipText}>+₹{chipVal}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {/* Payment Mode Selector */}
+                <Text style={[styles.inputLabelCustom, { marginTop: 12, marginBottom: 6 }]}>
+                  भुगतान का माध्यम (Payment Mode):
+                </Text>
+                <View style={styles.supportModeRow}>
+                  {[
+                    { id: 'Cash', label: '💵 कैश (Cash)', color: '#16A34A' },
+                    { id: 'PhonePe', label: '📱 PhonePe / UPI', color: '#5F259F' },
+                    { id: 'BOB Bank', label: '🏦 BOB / Bank', color: '#EA580C' }
+                  ].map(m => (
+                    <TouchableOpacity
+                      key={m.id}
+                      onPress={() => setSupportPaymentMode(m.id)}
+                      style={[
+                        styles.supportModeBtn,
+                        supportPaymentMode === m.id && { backgroundColor: m.color, borderColor: m.color }
+                      ]}
+                    >
+                      <Text style={[
+                        styles.supportModeBtnText,
+                        supportPaymentMode === m.id && { color: '#FFFFFF', fontWeight: 'bold' }
+                      ]}>
+                        {m.label}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {/* Notes / Reason */}
+                <View style={{ marginTop: 12 }}>
+                  <CustomInput 
+                    label="भुगतान का कारण / विवरण (Notes)" 
+                    value={supportNotes} 
+                    onChangeText={setSupportNotes} 
+                    leftIcon="reader-outline" 
+                    placeholder="उदा. दैनिक मजदूरी / चौकीदार मानदेय"
+                  />
+                </View>
+
+                {/* Notice info */}
+                <View style={styles.supportNoticeBanner}>
+                  <Icon name="information-circle-outline" size={16} color="#0369A1" />
+                  <Text style={styles.supportNoticeText}>
+                    यह राशि आज के खर्चों (Expenses) में जुड़ेगी तथा दैनिक ऑडिट रिपोर्ट (PDF) व Owner Dashboard में दिखाई देगी।
+                  </Text>
+                </View>
+
+                {/* Save Button */}
+                <CustomButton 
+                  title={supportSaving ? "दर्ज हो रहा है..." : "💾 भुगतान दर्ज करें (Save Payment)"} 
+                  onPress={handleSaveSupportPayment} 
+                  loading={supportSaving} 
+                  disabled={!supportAmt || parseFloat(supportAmt) <= 0 || supportSaving}
+                  type={(!supportAmt || parseFloat(supportAmt) <= 0) ? "secondary" : "primary"}
+                  style={{ marginTop: 14 }}
+                />
+              </View>
+            </View>
+          ) : null}
+
+          {/* Shift Indicator & Selector Card */}
           {selectedMachine !== '' && (
             <View style={[styles.shiftCard, shiftNumber > 1 ? styles.shiftCardShift2 : styles.shiftCardShift1]}>
               <View style={styles.shiftCardTop}>
@@ -1490,7 +2322,7 @@ export default function DailyEntryScreen({ navigation }) {
                   <View style={[styles.shiftPill, shiftNumber > 1 ? styles.shiftPillShift2 : styles.shiftPillShift1]}>
                     <Icon name={shiftNumber > 1 ? "moon" : "sunny"} size={14} color={shiftNumber > 1 ? "#7C3AED" : "#D97706"} />
                     <Text style={[styles.shiftPillText, shiftNumber > 1 ? styles.shiftPillTextShift2 : styles.shiftPillTextShift1]}>
-                      शिफ्ट {shiftNumber} (Shift {shiftNumber})
+                      {shiftNumber === 1 ? 'शिफ्ट 1 (Testing Add)' : 'शिफ्ट 2 (No Testing)'}
                     </Text>
                   </View>
                   <Text style={styles.shiftCardMachineName}>
@@ -1505,17 +2337,64 @@ export default function DailyEntryScreen({ navigation }) {
                 )}
               </View>
 
+              {/* Shift Selection Buttons (Testing vs No Testing) */}
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setShiftNumber(1);
+                    if (petrolTestingQty === '0' || !petrolTestingQty) setPetrolTestingQty('5');
+                    if (dieselTestingQty === '0' || !dieselTestingQty) setDieselTestingQty('5');
+                  }}
+                  style={{
+                    flex: 1,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    paddingVertical: 7,
+                    borderRadius: 8,
+                    backgroundColor: shiftNumber === 1 ? '#D97706' : '#FFFFFF',
+                    borderWidth: 1,
+                    borderColor: '#D97706'
+                  }}
+                >
+                  <Icon name="sunny" size={14} color={shiftNumber === 1 ? "#FFFFFF" : "#D97706"} style={{ marginRight: 4 }} />
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: shiftNumber === 1 ? "#FFFFFF" : "#D97706" }}>
+                    शिफ्ट 1 (Testing Add)
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setShiftNumber(2);
+                    setPetrolTestingQty('0');
+                    setDieselTestingQty('0');
+                  }}
+                  style={{
+                    flex: 1,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    paddingVertical: 7,
+                    borderRadius: 8,
+                    backgroundColor: shiftNumber === 2 ? '#7C3AED' : '#FFFFFF',
+                    borderWidth: 1,
+                    borderColor: '#7C3AED'
+                  }}
+                >
+                  <Icon name="moon" size={14} color={shiftNumber === 2 ? "#FFFFFF" : "#7C3AED"} style={{ marginRight: 4 }} />
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: shiftNumber === 2 ? "#FFFFFF" : "#7C3AED" }}>
+                    शिफ्ट 2 (No Testing)
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
               {shiftNumber > 1 ? (
                 <View style={{ marginTop: 8 }}>
                   <Text style={styles.shiftInfoText}>
-                    ⚡ इस मशीन पर पूर्व शिफ्ट का हिसाब पूर्ण हो चुका है। ओपनिंग मीटर पिछली शिफ्ट के क्लोजिंग मीटर से स्वतः लोड हो गया है।
+                    ⚡ शिफ्ट 2 में टेस्टिंग तेल नहीं जुड़ेगा (0 L)। ओपनिंग मीटर पिछली शिफ्ट से स्वतः लिंक्ड है।
                   </Text>
-                  <View style={styles.shiftNoTestingBadge}>
-                    <Icon name="checkmark-circle" size={14} color="#047857" />
-                    <Text style={styles.shiftNoTestingText}>
-                      शिफ्ट {shiftNumber} में जांच तेल (Testing Fuel) का विकल्प बंद है (0 L).
-                    </Text>
-                  </View>
                   
                   {!isEditMode && todayMachineEntries.length > 0 && (
                     <TouchableOpacity style={styles.shiftActionBtn} onPress={handleEditPreviousShift}>
@@ -1527,9 +2406,9 @@ export default function DailyEntryScreen({ navigation }) {
                   )}
                 </View>
               ) : (
-                <View style={{ marginTop: 6 }}>
+                <View style={{ marginTop: 8 }}>
                   <Text style={styles.shiftInfoText}>
-                    ☀️ आज की पहली शिफ्ट। ओपनिंग मीटर और जांच तेल (Testing Fuel) दर्ज करें।
+                    ☀️ शिफ्ट 1: टेस्टिंग का तेल Tank 1 और Tank 2 में वापस जुड़ेगा।
                   </Text>
                 </View>
               )}
@@ -1618,12 +2497,29 @@ export default function DailyEntryScreen({ navigation }) {
                   </Text>
                 </View>
 
+                {/* Mobil Row (if any) */}
+                {totalMobilAmount > 0 && (
+                  <View style={styles.receiptFuelRow}>
+                    <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                      <View style={[styles.fuelDot, { backgroundColor: '#7C3AED' }]} />
+                      <Text style={styles.fuelLabel}>मोबिल ऑयल ({totalMobilQty} Pcs):</Text>
+                    </View>
+                    <Text style={styles.fuelValueText}>
+                      <Text style={{color: '#7C3AED', fontWeight: 'bold'}}>+₹{totalMobilAmount.toFixed(2)}</Text>
+                    </Text>
+                  </View>
+                )}
+
                 <View style={styles.receiptDivider} />
 
-                {/* Total Net Sold */}
+                {/* Separate Petrol & Diesel Net Sold (Never Combined) */}
                 <View style={styles.receiptRow}>
-                  <Text style={styles.receiptMainLabel}>कुल ईंधन बिक्री (Total Fuel Sold):</Text>
-                  <Text style={styles.receiptMainValue}>{totalLitersSold.toFixed(4)} L</Text>
+                  <Text style={[styles.receiptMainLabel, { color: '#EA580C' }]}>पेट्रोल शुद्ध बिक्री (Petrol MS):</Text>
+                  <Text style={[styles.receiptMainValue, { color: '#EA580C' }]}>{pNetSold.toFixed(4)} L</Text>
+                </View>
+                <View style={styles.receiptRow}>
+                  <Text style={[styles.receiptMainLabel, { color: '#003C8F' }]}>डीजल शुद्ध बिक्री (Diesel HSD):</Text>
+                  <Text style={[styles.receiptMainValue, { color: '#003C8F' }]}>{dNetSold.toFixed(4)} L</Text>
                 </View>
 
                 {/* Fuel Amount Subtotal */}
@@ -1692,42 +2588,41 @@ export default function DailyEntryScreen({ navigation }) {
                   />
                 </View>
 
-                {/* Testing Liters & Rate (Shift 1: Testing + Rate | Shift 2+: Rate Only) */}
-                {shiftNumber === 1 ? (
-                  <View style={styles.twoColumnRow}>
-                    <View style={{ flex: 1, marginRight: 8 }}>
-                      <CustomInput 
-                        label="जांच तेल (Testing L)" 
-                        keyboardType="numeric" 
-                        value={petrolTestingQty} 
-                        onChangeText={(t) => setPetrolTestingQty(sanitizeDecimalInput(t))} 
-                        leftIcon="flask-outline" 
-                        placeholder="5"
-                      />
-                    </View>
-                    <View style={{ flex: 1, marginLeft: 8 }}>
-                      <CustomInput 
-                        label="पेट्रोल रेट (₹/L) *" 
-                        keyboardType="numeric" 
-                        value={petrolRate} 
-                        onChangeText={(t) => setPetrolRate(sanitizeDecimalInput(t))} 
-                        leftIcon="pricetag-outline" 
-                        placeholder="0.00"
-                      />
-                    </View>
-                  </View>
-                ) : (
-                  <View style={{ marginTop: 10 }}>
+                {/* Testing Section: Daily Testing & Official Testing Side-by-Side */}
+                <View style={styles.twoColumnRow}>
+                  <View style={{ flex: 1, marginRight: 6 }}>
                     <CustomInput 
-                      label="पेट्रोल रेट (₹/L) *" 
+                      label="दैनिक जांच (Testing L)" 
                       keyboardType="numeric" 
-                      value={petrolRate} 
-                      onChangeText={(t) => setPetrolRate(sanitizeDecimalInput(t))} 
-                      leftIcon="pricetag-outline" 
-                      placeholder="0.00"
+                      value={petrolTestingQty} 
+                      onChangeText={(t) => setPetrolTestingQty(sanitizeDecimalInput(t))} 
+                      leftIcon="flask-outline" 
+                      placeholder={shiftNumber === 1 ? "5" : "0"}
                     />
                   </View>
-                )}
+                  <View style={{ flex: 1, marginLeft: 6 }}>
+                    <CustomInput 
+                      label="ऑफिशियल जांच (Official L)" 
+                      keyboardType="numeric" 
+                      value={petrolOfficialTestingQty} 
+                      onChangeText={(t) => setPetrolOfficialTestingQty(sanitizeDecimalInput(t))} 
+                      leftIcon="shield-checkmark-outline" 
+                      placeholder="0"
+                    />
+                  </View>
+                </View>
+
+                {/* Petrol Rate */}
+                <View style={{ marginTop: 10 }}>
+                  <CustomInput 
+                    label="पेट्रोल रेट (₹/L) *" 
+                    keyboardType="numeric" 
+                    value={petrolRate} 
+                    onChangeText={(t) => setPetrolRate(sanitizeDecimalInput(t))} 
+                    leftIcon="pricetag-outline" 
+                    placeholder="0.00"
+                  />
+                </View>
 
                 {/* Information badge if testing was already recorded today (Shift 1 only) */}
                 {shiftNumber === 1 && petrolTestingAlreadyDone && (
@@ -1739,8 +2634,18 @@ export default function DailyEntryScreen({ navigation }) {
                   </View>
                 )}
 
+                {/* Official Testing notice if entered */}
+                {pOfficialTesting > 0 && (
+                  <View style={[styles.tankReturnNotice, { backgroundColor: '#F0FDF4', borderColor: '#86EFAC' }]}>
+                    <Icon name="shield-checkmark" size={16} color="#16A34A" />
+                    <Text style={[styles.tankReturnText, { color: '#166534' }]}>
+                      {`ऑफिशियल जांच दर्ज: ${pOfficialTesting} L (कुल जांच तेल: ${pTesting} L वापस Tank 1 में जुड़ेगा)`}
+                    </Text>
+                  </View>
+                )}
+
                 {/* Return to Tank Notice */}
-                {shiftNumber === 1 && pTesting > 0 && (
+                {pTesting > 0 && pOfficialTesting === 0 && (
                   <View style={styles.tankReturnNotice}>
                     <Icon name="arrow-undo-circle" size={16} color="#0369A1" />
                     <Text style={styles.tankReturnText}>
@@ -1788,42 +2693,41 @@ export default function DailyEntryScreen({ navigation }) {
                   />
                 </View>
 
-                {/* Testing Liters & Rate (Shift 1: Testing + Rate | Shift 2+: Rate Only) */}
-                {shiftNumber === 1 ? (
-                  <View style={styles.twoColumnRow}>
-                    <View style={{ flex: 1, marginRight: 8 }}>
-                      <CustomInput 
-                        label="जांच तेल (Testing L)" 
-                        keyboardType="numeric" 
-                        value={dieselTestingQty} 
-                        onChangeText={(t) => setDieselTestingQty(sanitizeDecimalInput(t))} 
-                        leftIcon="flask-outline" 
-                        placeholder="5"
-                      />
-                    </View>
-                    <View style={{ flex: 1, marginLeft: 8 }}>
-                      <CustomInput 
-                        label="डीजल रेट (₹/L) *" 
-                        keyboardType="numeric" 
-                        value={dieselRate} 
-                        onChangeText={(t) => setDieselRate(sanitizeDecimalInput(t))} 
-                        leftIcon="pricetag-outline" 
-                        placeholder="0.00"
-                      />
-                    </View>
-                  </View>
-                ) : (
-                  <View style={{ marginTop: 10 }}>
+                {/* Testing Section: Daily Testing & Official Testing Side-by-Side */}
+                <View style={styles.twoColumnRow}>
+                  <View style={{ flex: 1, marginRight: 6 }}>
                     <CustomInput 
-                      label="डीजल रेट (₹/L) *" 
+                      label="दैनिक जांच (Testing L)" 
                       keyboardType="numeric" 
-                      value={dieselRate} 
-                      onChangeText={(t) => setDieselRate(sanitizeDecimalInput(t))} 
-                      leftIcon="pricetag-outline" 
-                      placeholder="0.00"
+                      value={dieselTestingQty} 
+                      onChangeText={(t) => setDieselTestingQty(sanitizeDecimalInput(t))} 
+                      leftIcon="flask-outline" 
+                      placeholder={shiftNumber === 1 ? "5" : "0"}
                     />
                   </View>
-                )}
+                  <View style={{ flex: 1, marginLeft: 6 }}>
+                    <CustomInput 
+                      label="ऑफिशियल जांच (Official L)" 
+                      keyboardType="numeric" 
+                      value={dieselOfficialTestingQty} 
+                      onChangeText={(t) => setDieselOfficialTestingQty(sanitizeDecimalInput(t))} 
+                      leftIcon="shield-checkmark-outline" 
+                      placeholder="0"
+                    />
+                  </View>
+                </View>
+
+                {/* Diesel Rate */}
+                <View style={{ marginTop: 10 }}>
+                  <CustomInput 
+                    label="डीजल रेट (₹/L) *" 
+                    keyboardType="numeric" 
+                    value={dieselRate} 
+                    onChangeText={(t) => setDieselRate(sanitizeDecimalInput(t))} 
+                    leftIcon="pricetag-outline" 
+                    placeholder="0.00"
+                  />
+                </View>
 
                 {/* Information badge if testing was already recorded today (Shift 1 only) */}
                 {shiftNumber === 1 && dieselTestingAlreadyDone && (
@@ -1835,8 +2739,18 @@ export default function DailyEntryScreen({ navigation }) {
                   </View>
                 )}
 
+                {/* Official Testing notice if entered */}
+                {dOfficialTesting > 0 && (
+                  <View style={[styles.tankReturnNotice, { backgroundColor: '#F0FDF4', borderColor: '#86EFAC' }]}>
+                    <Icon name="shield-checkmark" size={16} color="#16A34A" />
+                    <Text style={[styles.tankReturnText, { color: '#166534' }]}>
+                      {`ऑफिशियल जांच दर्ज: ${dOfficialTesting} L (कुल जांच तेल: ${dTesting} L वापस Tank 2 में जुड़ेगा)`}
+                    </Text>
+                  </View>
+                )}
+
                 {/* Return to Tank Notice */}
-                {shiftNumber === 1 && dTesting > 0 && (
+                {dTesting > 0 && dOfficialTesting === 0 && (
                   <View style={styles.tankReturnNotice}>
                     <Icon name="arrow-undo-circle" size={16} color="#0369A1" />
                     <Text style={styles.tankReturnText}>
@@ -1851,6 +2765,93 @@ export default function DailyEntryScreen({ navigation }) {
                     डीजल शुद्ध बिक्री: <Text style={{fontWeight: 'bold'}}>{dNetSold.toFixed(4)} L</Text>  |  अपेक्षित: <Text style={{fontWeight: 'bold', color: '#003C8F'}}>₹{dExpected.toFixed(2)}</Text>
                   </Text>
                 </View>
+              </View>
+
+              {/* SECTION: ADDITIONAL MOBIL (ENGINE OIL / LUBRICANTS) SALE */}
+              <View style={[styles.sectionCard, { borderLeftColor: '#7C3AED', borderLeftWidth: 5, marginTop: 14 }]}>
+                <View style={styles.sectionHeaderRow}>
+                  <View style={{flexDirection: 'row', alignItems: 'center', flex: 1}}>
+                    <Icon name="color-palette-outline" size={20} color="#7C3AED" style={{marginRight: 6}} />
+                    <View style={{flex: 1}}>
+                      <Text style={[styles.sectionTitle, { color: '#7C3AED' }]}>अतिरिक्त बिक्री: मोबिल ऑयल (Mobil Sale)</Text>
+                      <Text style={{fontSize: 11, color: '#64748B'}}>इंजन ऑयल / 2T ऑयल / ल्यूब (वैकल्पिक)</Text>
+                    </View>
+                  </View>
+                  <TouchableOpacity 
+                    style={styles.addMobilBtn}
+                    onPress={() => handleAddMobilRow('')}
+                  >
+                    <Icon name="add-circle" size={17} color="#fff" style={{marginRight: 4}} />
+                    <Text style={styles.addMobilBtnText}>+ मोबिल जोड़ें</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Empty State or Mobil List */}
+                {mobilEntries.length === 0 ? (
+                  <View style={styles.emptyMobilBox}>
+                    <Icon name="cube-outline" size={32} color="#A78BFA" />
+                    <Text style={styles.emptyMobilText}>
+                      इस शिफ्ट में यदि कोई मोबिल ऑयल बिका है तो ऊपर '+ मोबिल जोड़ें' दबाएं.
+                    </Text>
+                  </View>
+                ) : (
+                  <View style={{ marginTop: 8 }}>
+                    {mobilEntries.map((mItem, index) => (
+                      <View key={mItem.id} style={styles.mobilItemCard}>
+                        <View style={styles.mobilItemHeader}>
+                          <Text style={styles.mobilItemNumber}>#{index + 1} मोबिल एंट्री</Text>
+                          <TouchableOpacity onPress={() => handleRemoveMobilRow(mItem.id)} style={styles.mobilTrashBtn}>
+                            <Icon name="trash-outline" size={18} color="#DC2626" />
+                          </TouchableOpacity>
+                        </View>
+
+                        {/* Row with: Pack Size / Type, Quantity, Amount */}
+                        <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginTop: 4 }}>
+                          <View style={{ flex: 1.8, marginRight: 6 }}>
+                            <CustomInput 
+                              label="मात्रा (ML / L)" 
+                              placeholder="Type ML / L" 
+                              value={mItem.packSize} 
+                              onChangeText={(val) => handleUpdateMobilRow(mItem.id, 'packSize', val)} 
+                              style={{ marginBottom: 0 }}
+                              inputStyle={{ height: 44, padding: 8, fontSize: 13 }}
+                            />
+                          </View>
+                          <View style={{ flex: 1.1, marginRight: 6 }}>
+                            <CustomInput 
+                              label="पीस (Qty)" 
+                              keyboardType="numeric" 
+                              placeholder="1" 
+                              value={mItem.quantity} 
+                              onChangeText={(val) => handleUpdateMobilRow(mItem.id, 'quantity', val)} 
+                              style={{ marginBottom: 0 }}
+                              inputStyle={{ height: 44, padding: 8, textAlign: 'center', fontSize: 13 }}
+                            />
+                          </View>
+                          <View style={{ flex: 1.8 }}>
+                            <CustomInput 
+                              label="कुल रकम (₹) *" 
+                              keyboardType="numeric" 
+                              placeholder="0.00" 
+                              value={mItem.amount} 
+                              onChangeText={(val) => handleUpdateMobilRow(mItem.id, 'amount', val)} 
+                              leftIcon="cash-outline"
+                              style={{ marginBottom: 0 }}
+                              inputStyle={{ height: 44, padding: 8, fontSize: 13 }}
+                            />
+                          </View>
+                        </View>
+                      </View>
+                    ))}
+
+                    {/* Mobil Total Live Summary */}
+                    <View style={styles.mobilTotalBanner}>
+                      <Text style={styles.mobilTotalText}>
+                        कुल मोबिल बिक्री: <Text style={{fontWeight: 'bold'}}>{totalMobilQty} पीस</Text>  |  रकम: <Text style={{fontWeight: 'bold', color: '#7C3AED'}}>₹{totalMobilAmount.toFixed(2)}</Text>
+                      </Text>
+                    </View>
+                  </View>
+                )}
               </View>
 
               {/* SECTION C: COMBINED PAYMENT COLLECTIONS */}
@@ -1923,38 +2924,170 @@ export default function DailyEntryScreen({ navigation }) {
                   )}
                 </View>
 
-                {/* 2. Multi-Mode Digital / ATM / Online / Fleet Cards */}
+                {/* 2. Multi-Mode Digital & Bank Payments (Direct 4-Mode Breakdown) */}
                 <View style={{marginBottom: 16}}>
-                  <Text style={styles.inputLabelCustom}>2. डिजिटल, कार्ड व ऑनलाइन संग्रह (Digital / ATM / Cards ₹)</Text>
-                  <View style={styles.digitalCardBox}>
-                    <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}}>
-                      <Text style={styles.digitalCardTotalText}>
-                        कुल डिजिटल: <Text style={{color: '#003C8F', fontWeight: '900'}}>₹{digitalAmt.toFixed(2)}</Text>
+                  <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6}}>
+                    <Text style={styles.inputLabelCustom}>2. Digital Payments</Text>
+                    <TouchableOpacity 
+                      style={styles.openDigitalMiniBtn}
+                      onPress={() => setDigitalModalVisible(true)}
+                    >
+                      <Icon name="options-outline" size={13} color="#003C8F" style={{marginRight: 3}} />
+                      <Text style={styles.openDigitalMiniText}>विस्तार सूची</Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.digitalDirectCard}>
+                    {/* 2x2 Grid of Fixed Modes */}
+                    <View style={styles.digitalGridRow}>
+                      {/* Paytm */}
+                      <View style={styles.digitalGridCol}>
+                        <View style={[styles.digitalInputHeader, { borderLeftColor: '#00B9F5' }]}>
+                          <Icon name="wallet" size={15} color="#00B9F5" style={{marginRight: 4}} />
+                          <Text style={[styles.digitalInputTitle, { color: '#0284C7' }]}>Paytm (पेटीएम)</Text>
+                        </View>
+                        <CustomInput 
+                          keyboardType="numeric" 
+                          placeholder="0.00" 
+                          value={digitalEntries.find(d => d.id === 'paytm')?.amount || ''} 
+                          onChangeText={(v) => handleDigitalAmountChange('paytm', v)}
+                          leftIcon="qr-code-outline"
+                          style={{ marginBottom: 0 }}
+                          inputStyle={{ height: 44, padding: 8, fontSize: 14, fontWeight: '700' }}
+                        />
+                      </View>
+
+                      {/* PhonePe */}
+                      <View style={styles.digitalGridCol}>
+                        <View style={[styles.digitalInputHeader, { borderLeftColor: '#5F259F' }]}>
+                          <Icon name="phone-portrait" size={15} color="#5F259F" style={{marginRight: 4}} />
+                          <Text style={[styles.digitalInputTitle, { color: '#5F259F' }]}>PhonePe (फोनपे)</Text>
+                        </View>
+                        <CustomInput 
+                          keyboardType="numeric" 
+                          placeholder="0.00" 
+                          value={digitalEntries.find(d => d.id === 'phonepe' || d.id === 'phonePe')?.amount || ''} 
+                          onChangeText={(v) => handleDigitalAmountChange('phonepe', v)}
+                          leftIcon="qr-code-outline"
+                          style={{ marginBottom: 0 }}
+                          inputStyle={{ height: 44, padding: 8, fontSize: 14, fontWeight: '700' }}
+                        />
+                      </View>
+                    </View>
+
+                    <View style={[styles.digitalGridRow, { marginTop: 10 }]}>
+                      {/* ATM / POS */}
+                      <View style={styles.digitalGridCol}>
+                        <View style={[styles.digitalInputHeader, { borderLeftColor: '#003C8F' }]}>
+                          <Icon name="card" size={15} color="#003C8F" style={{marginRight: 4}} />
+                          <Text style={[styles.digitalInputTitle, { color: '#003C8F' }]}>ATM / POS स्वाइप</Text>
+                        </View>
+                        <CustomInput 
+                          keyboardType="numeric" 
+                          placeholder="0.00" 
+                          value={digitalEntries.find(d => d.id === 'atm')?.amount || ''} 
+                          onChangeText={(v) => handleDigitalAmountChange('atm', v)}
+                          leftIcon="card-outline"
+                          style={{ marginBottom: 0 }}
+                          inputStyle={{ height: 44, padding: 8, fontSize: 14, fontWeight: '700' }}
+                        />
+                      </View>
+
+                      {/* BOB Bank */}
+                      <View style={styles.digitalGridCol}>
+                        <View style={[styles.digitalInputHeader, { borderLeftColor: '#EA580C' }]}>
+                          <Icon name="business" size={15} color="#EA580C" style={{marginRight: 4}} />
+                          <Text style={[styles.digitalInputTitle, { color: '#EA580C' }]}>BOB Bank (बड़ौदा)</Text>
+                        </View>
+                        <CustomInput 
+                          keyboardType="numeric" 
+                          placeholder="0.00" 
+                          value={digitalEntries.find(d => d.id === 'bob')?.amount || ''} 
+                          onChangeText={(v) => handleDigitalAmountChange('bob', v)}
+                          leftIcon="business-outline"
+                          style={{ marginBottom: 0 }}
+                          inputStyle={{ height: 44, padding: 8, fontSize: 14, fontWeight: '700' }}
+                        />
+                      </View>
+                    </View>
+
+                    {/* Custom / Added Permanent Digital Payments */}
+                    {digitalEntries.filter(d => !d.isFixed).length > 0 && (
+                      <View style={{ marginTop: 10 }}>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: '#475569', marginBottom: 4 }}>
+                          अन्य स्थायी डिजिटल माध्यम (Permanent Modes):
+                        </Text>
+                        {digitalEntries.filter(d => !d.isFixed).map((item) => (
+                          <View key={item.id} style={styles.customDigitalRow}>
+                            <View style={styles.customDigitalNameCol}>
+                              <View style={[styles.digitalInputHeader, { borderLeftColor: item.color || '#0F766E' }]}>
+                                <Icon name={item.icon || 'card'} size={15} color={item.color || '#0F766E'} style={{ marginRight: 4 }} />
+                                <Text style={[styles.digitalInputTitle, { color: item.color || '#0F766E' }]} numberOfLines={1}>
+                                  {item.name}
+                                </Text>
+                              </View>
+                            </View>
+                            <View style={styles.customDigitalAmountCol}>
+                              <CustomInput 
+                                keyboardType="numeric" 
+                                placeholder="0.00" 
+                                value={item.amount || ''} 
+                                onChangeText={(val) => handleDigitalAmountChange(item.id, val)}
+                                leftIcon="cash-outline"
+                                style={{ marginBottom: 0 }}
+                                inputStyle={{ height: 42, padding: 8, fontSize: 13, fontWeight: '700' }}
+                              />
+                            </View>
+                            <TouchableOpacity 
+                              style={styles.customDigitalDeleteBtn} 
+                              onPress={() => handleDeletePermanentMode(item)}
+                              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            >
+                              <Icon name="trash-outline" size={19} color="#DC2626" />
+                            </TouchableOpacity>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+
+                    {/* Quick Preset Buttons & Permanent Add Button */}
+                    <View style={{ marginTop: 10 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#64748B', marginBottom: 6 }}>
+                        स्थायी पेमेंट माध्यम जोड़ें (Click preset to add permanently):
                       </Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                        {['Google Pay', 'BharatPe', 'HDFC QR', 'SBI UPI', 'Cred', 'Axis Bank'].map((pName) => {
+                          const alreadyAdded = masterDigitalModes.some(m => m.name.toLowerCase() === pName.toLowerCase());
+                          if (alreadyAdded) return null;
+                          return (
+                            <TouchableOpacity
+                              key={pName}
+                              style={styles.quickPresetChip}
+                              onPress={() => handleSavePermanentMode(pName)}
+                            >
+                              <Icon name="add" size={13} color="#003C8F" style={{ marginRight: 2 }} />
+                              <Text style={styles.quickPresetChipText}>{pName}</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+
                       <TouchableOpacity 
-                        style={styles.openDigitalBtn}
-                        onPress={() => setDigitalModalVisible(true)}
+                        style={styles.addDigitalBtn} 
+                        onPress={() => setAddModeModalVisible(true)}
                       >
-                        <Icon name="options-outline" size={15} color="#fff" style={{marginRight: 4}} />
-                        <Text style={styles.openDigitalBtnText}>माध्यम चुनें / बदलें</Text>
+                        <Icon name="add-circle-outline" size={17} color="#003C8F" style={{ marginRight: 4 }} />
+                        <Text style={styles.addDigitalBtnText}>+ नया डिजिटल पेमेंट स्थायी जोड़ें (Permanent Add)</Text>
                       </TouchableOpacity>
                     </View>
 
-                    {/* Active Digital Modes Chips Preview */}
-                    <View style={styles.chipsContainer}>
-                      {digitalEntries.filter(e => parseFloat(e.amount) > 0).length === 0 ? (
-                        <Text style={styles.noChipsText}>
-                          Paytm, PhonePe, ATM स्वाइप, ExtraPower आदि भरने के लिए ऊपर बटन दबाएं.
-                        </Text>
-                      ) : (
-                        digitalEntries.filter(e => parseFloat(e.amount) > 0).map(item => (
-                          <View key={item.id} style={styles.activeChip}>
-                            <Text style={styles.activeChipText}>
-                              {item.name}: <Text style={{fontWeight: 'bold'}}>₹{item.amount}</Text>
-                            </Text>
-                          </View>
-                        ))
-                      )}
+                    {/* Digital Live Total Bar */}
+                    <View style={styles.digitalLiveTotalBar}>
+                      <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                        <Icon name="checkmark-circle" size={16} color="#003C8F" style={{marginRight: 4}} />
+                        <Text style={styles.digitalLiveTotalLabel}>कुल डिजिटल / बैंक प्राप्ति:</Text>
+                      </View>
+                      <Text style={styles.digitalLiveTotalVal}>₹{digitalAmt.toFixed(2)}</Text>
                     </View>
                   </View>
                 </View>
@@ -2010,12 +3143,17 @@ export default function DailyEntryScreen({ navigation }) {
                           <Picker
                             selectedValue={selectedReturnCustomer}
                             onValueChange={handleSelectReturnCustomer}
-                            style={styles.picker}
+                            style={[styles.picker, { color: '#0F172A', backgroundColor: '#FFFFFF' }]}
                             dropdownIconColor="#16A34A"
                             itemStyle={{ color: '#0F172A', fontSize: 14 }}
                             mode="dropdown"
                           >
-                            <Picker.Item label="-- ग्राहक चुनें --" value="" color="#64748B" />
+                            <Picker.Item 
+                              label="-- ग्राहक चुनें --" 
+                              value="" 
+                              color="#64748B" 
+                              style={{ color: '#64748B', backgroundColor: '#FFFFFF' }}
+                            />
                             {pendingUdhariCustomers
                               .filter(c => !udhariReturnEntries.find(e => e.docId === c.docId))
                               .map(c => (
@@ -2024,6 +3162,7 @@ export default function DailyEntryScreen({ navigation }) {
                                   label={`${c.customerName} — बकाया: ₹${c.remainingAmount.toFixed(0)}`} 
                                   value={c.docId} 
                                   color="#0F172A"
+                                  style={{ color: '#0F172A', backgroundColor: '#FFFFFF' }}
                                 />
                               ))
                             }
@@ -2125,6 +3264,70 @@ export default function DailyEntryScreen({ navigation }) {
                 </View>
               </View>
 
+              {/* 📊 FINAL RECONCILIATION SUMMARY */}
+              <View style={styles.reconcileCard}>
+                <View style={styles.reconcileCardHeader}>
+                  <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                    <Icon name="calculator" size={20} color="#003C8F" style={{marginRight: 6}} />
+                    <Text style={styles.reconcileCardTitle}>अंतिम हिसाब मिलान (Final Reconciliation Ledger)</Text>
+                  </View>
+                </View>
+
+                {/* Breakdown Summary Grid */}
+                <View style={styles.reconcileGrid}>
+                  <View style={styles.reconcileRow}>
+                    <Text style={styles.reconcileRowLabel}>अपेक्षित कुल बिक्री (Expected Sales):</Text>
+                    <Text style={[styles.reconcileRowVal, { color: '#003C8F' }]}>₹{totalExpectedAmount.toFixed(2)}</Text>
+                  </View>
+                  <Text style={styles.reconcileSubDetail}>
+                    (पेट्रोल: ₹{pExpected.toFixed(2)} + डीजल: ₹{dExpected.toFixed(2)}{totalMobilAmount > 0 ? ` + मोबिल: ₹${totalMobilAmount.toFixed(2)}` : ''}{udhariReturnTotal > 0 ? ` + उधारी वापसी: ₹${udhariReturnTotal.toFixed(2)}` : ''})
+                  </Text>
+
+                  <View style={[styles.reconcileRow, { marginTop: 8 }]}>
+                    <Text style={styles.reconcileRowLabel}>कुल दर्ज वसूली (Total Collection):</Text>
+                    <Text style={[styles.reconcileRowVal, { color: '#16A34A' }]}>₹{totalCollection.toFixed(2)}</Text>
+                  </View>
+                  <Text style={styles.reconcileSubDetail}>
+                    (कैश: ₹{cashAmt.toFixed(2)} + डिजिटल: ₹{digitalAmt.toFixed(2)} + उधारी: ₹{udhariAmt.toFixed(2)} - खर्चे: ₹{expenseAmt.toFixed(2)})
+                  </Text>
+                </View>
+
+                {/* Variance Status Banner */}
+                <View style={[
+                  styles.reconcileStatusBadge,
+                  Math.abs(shortageOrExcess) < 0.01 
+                    ? styles.reconcileStatusBalanced 
+                    : shortageOrExcess < 0 
+                      ? styles.reconcileStatusShortage 
+                      : styles.reconcileStatusExcess
+                ]}>
+                  <Icon 
+                    name={Math.abs(shortageOrExcess) < 0.01 ? "checkmark-circle" : (shortageOrExcess < 0 ? "alert-circle" : "information-circle")} 
+                    size={22} 
+                    color={Math.abs(shortageOrExcess) < 0.01 ? "#15803D" : (shortageOrExcess < 0 ? "#DC2626" : "#0284C7")} 
+                  />
+                  <View style={{ marginLeft: 8, flex: 1 }}>
+                    <Text style={[
+                      styles.reconcileStatusTitle,
+                      { color: Math.abs(shortageOrExcess) < 0.01 ? "#15803D" : (shortageOrExcess < 0 ? "#DC2626" : "#0284C7") }
+                    ]}>
+                      {Math.abs(shortageOrExcess) < 0.01 
+                        ? '✅ हिसाब 100% बराबर है (Balanced)' 
+                        : shortageOrExcess < 0 
+                          ? `⚠️ कमी (Shortage): -₹${Math.abs(shortageOrExcess).toFixed(2)}` 
+                          : `ℹ️ अतिरिक्त (Excess): +₹${shortageOrExcess.toFixed(2)}`}
+                    </Text>
+                    <Text style={styles.reconcileStatusSub}>
+                      {Math.abs(shortageOrExcess) < 0.01 
+                        ? 'मीटर बिक्री और कुल वसूली पूर्णतः संतुलित है।' 
+                        : shortageOrExcess < 0 
+                          ? 'वसूली बिक्री से कम है। कृपया कैश, डिजिटल, उधारी या खर्चे की जांच करें।' 
+                          : 'वसूली बिक्री से अधिक है।'}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
               {/* PDF Preview / Share Button */}
               <TouchableOpacity 
                 style={styles.pdfDirectBtn} 
@@ -2160,286 +3363,333 @@ export default function DailyEntryScreen({ navigation }) {
       </KeyboardAvoidingView>
 
       {/* 1. Multi-Mode Digital & Cards Modal */}
-      <Modal visible={digitalModalVisible} animationType="slide" transparent={true}>
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>डिजिटल, कार्ड व फ्लीट माध्यम</Text>
-                <Text style={styles.modalSubTitle}>Paytm, PhonePe, ATM, ExtraPower, Cards</Text>
+      <ScrollableModal
+        visible={digitalModalVisible}
+        onRequestClose={() => setDigitalModalVisible(false)}
+      >
+        <View style={styles.modalHeader}>
+          <View>
+            <Text style={styles.modalTitle}>डिजिटल एवं बैंक माध्यम</Text>
+            <Text style={styles.modalSubTitle}>Paytm, PhonePe, ATM / POS, BOB Bank</Text>
+          </View>
+          <TouchableOpacity onPress={() => setDigitalModalVisible(false)}>
+            <Icon name="close-circle" size={26} color="#64748B" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Permanent 4 Payment Modes */}
+        <View style={{ marginTop: 10 }}>
+          {digitalEntries.filter(d => !d.isCustom).map((item) => (
+            <View key={item.id} style={styles.digitalInputRow}>
+              <View style={{flex: 1.8, flexDirection: 'row', alignItems: 'center', marginRight: 8}}>
+                <View style={{
+                  width: 32, 
+                  height: 32, 
+                  borderRadius: 16, 
+                  backgroundColor: `${item.color || '#003C8F'}18`, 
+                  justifyContent: 'center', 
+                  alignItems: 'center', 
+                  marginRight: 8
+                }}>
+                  <Icon name={item.icon || 'card-outline'} size={18} color={item.color || '#003C8F'} />
+                </View>
+                <Text style={styles.digitalRowLabel}>{item.name}</Text>
               </View>
-              <TouchableOpacity onPress={() => setDigitalModalVisible(false)}>
-                <Icon name="close-circle" size={26} color="#64748B" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Quick Add Presets Grid/Chips */}
-            <Text style={styles.presetSectionLabel}>त्वरित जोड़ें (Tap to Add Mode):</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.presetScroll}>
-              {PRESET_PAYMENT_MODES.map(preset => (
-                <TouchableOpacity 
-                  key={preset.id} 
-                  style={[styles.presetChip, { borderColor: preset.color }]}
-                  onPress={() => addPresetPaymentMode(preset)}
-                >
-                  <Icon name={preset.icon} size={14} color={preset.color} style={{marginRight: 4}} />
-                  <Text style={[styles.presetChipText, { color: preset.color }]}>+ {preset.name.split(' ')[0]}</Text>
-                </TouchableOpacity>
-              ))}
-              <TouchableOpacity 
-                style={[styles.presetChip, { borderColor: '#003C8F', backgroundColor: '#EFF6FF' }]}
-                onPress={() => setCustomModeInputVisible(true)}
-              >
-                <Icon name="add" size={14} color="#003C8F" style={{marginRight: 2}} />
-                <Text style={[styles.presetChipText, { color: '#003C8F', fontWeight: 'bold' }]}>कस्टम माध्यम</Text>
-              </TouchableOpacity>
-            </ScrollView>
-
-            {/* Custom Mode Add Box */}
-            {customModeInputVisible && (
-              <View style={styles.customAddBox}>
-                <TextInput 
-                  placeholder="माध्यम का नाम" 
-                  value={customModeName} 
-                  onChangeText={setCustomModeName} 
-                  style={styles.customTextInput}
+              <View style={{flex: 1.5}}>
+                <CustomInput 
+                  placeholder="0.00" 
+                  keyboardType="numeric" 
+                  value={item.amount} 
+                  onChangeText={(t) => handleDigitalAmountChange(item.id, t)} 
+                  leftIcon="cash-outline" 
+                  style={{marginBottom: 0}} 
+                  inputStyle={{padding: 8, height: 42}}
                 />
-                <TouchableOpacity style={styles.customAddBtn} onPress={addCustomPaymentMode}>
-                  <Text style={styles.customAddBtnText}>जोड़ें</Text>
-                </TouchableOpacity>
               </View>
-            )}
+            </View>
+          ))}
 
-            {/* Active Payment Inputs List */}
-            <ScrollView style={{maxHeight: 280, marginTop: 10}} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 20 }}>
-              {digitalEntries.map((item) => (
-                <View key={item.id} style={styles.digitalInputRow}>
-                  <View style={{flex: 1.8, marginRight: 8}}>
-                    <Text style={styles.digitalRowLabel}>{item.name}</Text>
+          {/* Custom Permanent Digital Entries in Modal */}
+          {digitalEntries.filter(d => !d.isFixed).length > 0 && (
+            <View style={{ marginTop: 12 }}>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: '#475569', marginBottom: 6 }}>
+                अन्य स्थायी डिजिटल माध्यम (Permanent Modes):
+              </Text>
+              {digitalEntries.filter(d => !d.isFixed).map((customItem) => (
+                <View key={customItem.id} style={[styles.customDigitalRow, { marginBottom: 8 }]}>
+                  <View style={{ flex: 1.6, marginRight: 6 }}>
+                    <View style={[styles.digitalInputHeader, { borderLeftColor: customItem.color || '#0F766E' }]}>
+                      <Icon name={customItem.icon || 'card'} size={15} color={customItem.color || '#0F766E'} style={{ marginRight: 4 }} />
+                      <Text style={[styles.digitalInputTitle, { color: customItem.color || '#0F766E' }]} numberOfLines={1}>
+                        {customItem.name}
+                      </Text>
+                    </View>
                   </View>
-                  <View style={{flex: 1.5, marginRight: 8}}>
+                  <View style={{ flex: 1.3, marginRight: 6 }}>
                     <CustomInput 
-                      placeholder="0.00" 
                       keyboardType="numeric" 
-                      value={item.amount} 
-                      onChangeText={(t) => handleDigitalAmountChange(item.id, t)} 
+                      placeholder="0.00" 
+                      value={customItem.amount || ''} 
+                      onChangeText={(val) => handleDigitalAmountChange(customItem.id, val)}
                       leftIcon="cash-outline" 
-                      style={{marginBottom: 0}}
-                      inputStyle={{padding: 8, height: 42}}
+                      style={{ marginBottom: 0 }} 
+                      inputStyle={{ height: 42, padding: 8, fontSize: 13, fontWeight: '700' }}
                     />
                   </View>
-                  {digitalEntries.length > 1 && (
-                    <TouchableOpacity onPress={() => removeDigitalEntry(item.id)} style={styles.removeRowBtn}>
-                      <Icon name="trash-outline" size={20} color="#DC2626" />
-                    </TouchableOpacity>
-                  )}
+                  <TouchableOpacity 
+                    style={styles.customDigitalDeleteBtn} 
+                    onPress={() => handleDeletePermanentMode(customItem)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  >
+                    <Icon name="trash-outline" size={20} color="#DC2626" />
+                  </TouchableOpacity>
                 </View>
               ))}
-            </ScrollView>
-
-            <View style={styles.modalFooter}>
-              <Text style={styles.modalFooterText}>
-                कुल डिजिटल संग्रह: <Text style={{color: '#003C8F', fontSize: 16}}>₹{calculateDigitalTotal().toFixed(2)}</Text>
-              </Text>
-              <CustomButton 
-                title="पुष्टि करें एवं सहेजें (Confirm & Save)" 
-                onPress={() => setDigitalModalVisible(false)} 
-                type="primary"
-                icon="checkmark-circle-outline"
-              />
             </View>
+          )}
+
+          {/* Add New Digital Payment Button in Modal */}
+          <TouchableOpacity 
+            style={[styles.addDigitalBtn, { marginTop: 12 }]} 
+            onPress={() => setAddModeModalVisible(true)}
+          >
+            <Icon name="add-circle-outline" size={18} color="#003C8F" style={{ marginRight: 4 }} />
+            <Text style={styles.addDigitalBtnText}>+ नया डिजिटल पेमेंट स्थायी जोड़ें (Permanent Add)</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.modalFooter}>
+          <Text style={styles.modalFooterText}>
+            कुल डिजिटल संग्रह: <Text style={{color: '#003C8F', fontSize: 16}}>₹{calculateDigitalTotal().toFixed(2)}</Text>
+          </Text>
+          <CustomButton 
+            title="पुष्टि करें एवं सहेजें (Confirm & Save)" 
+            onPress={() => setDigitalModalVisible(false)} 
+            type="primary"
+            icon="checkmark-circle-outline"
+          />
+        </View>
+      </ScrollableModal>
+
+      {/* Modal to Add New Permanent Payment Mode */}
+      <ScrollableModal
+        visible={addModeModalVisible}
+        onRequestClose={() => setAddModeModalVisible(false)}
+      >
+        <View style={styles.modalHeader}>
+          <View>
+            <Text style={styles.modalTitle}>स्थायी डिजिटल पेमेंट जोड़ें</Text>
+            <Text style={styles.modalSubTitle}>Add Permanent Payment Channel</Text>
           </View>
-        </KeyboardAvoidingView>
-      </Modal>
+          <TouchableOpacity onPress={() => setAddModeModalVisible(false)}>
+            <Icon name="close-circle" size={26} color="#64748B" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={{ marginTop: 12 }}>
+          <Text style={{ fontSize: 13, fontWeight: '700', color: '#334155', marginBottom: 8 }}>
+            1. तुरंत नाम चुनें (Quick Presets) या नीचे लिखें:
+          </Text>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+            {['Google Pay', 'BharatPe', 'HDFC QR', 'SBI UPI', 'Cred', 'Axis Bank', 'Kotak QR'].map((pName) => (
+              <TouchableOpacity
+                key={pName}
+                style={[styles.quickPresetChip, newModeName === pName && { backgroundColor: '#DBEAFE', borderColor: '#2563EB' }]}
+                onPress={() => setNewModeName(pName)}
+              >
+                <Icon name="checkmark" size={13} color={newModeName === pName ? '#2563EB' : '#64748B'} style={{ marginRight: 3 }} />
+                <Text style={[styles.quickPresetChipText, newModeName === pName && { color: '#1E40AF', fontWeight: '800' }]}>
+                  {pName}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <CustomInput
+            label="पेमेंट माध्यम का नाम (Payment Mode Name) *"
+            placeholder="उदा. Google Pay, BharatPe, HDFC QR"
+            value={newModeName}
+            onChangeText={setNewModeName}
+            leftIcon="card-outline"
+          />
+
+          <View style={{ marginTop: 16 }}>
+            <CustomButton
+              title="स्थायी रूप से सेव करें (Save Permanently)"
+              onPress={() => handleSavePermanentMode()}
+              loading={isSavingNewMode}
+              type="primary"
+              icon="checkmark-circle-outline"
+            />
+          </View>
+        </View>
+      </ScrollableModal>
 
       {/* 2. Cash Breakdown Modal */}
-      <Modal visible={cashBreakdownVisible} animationType="slide" transparent={true}>
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>कैश नोट एवं सिक्के (Cash Denominations)</Text>
-              <TouchableOpacity onPress={() => setCashBreakdownVisible(false)}>
-                <Icon name="close" size={24} color="#333" />
-              </TouchableOpacity>
-            </View>
+      <ScrollableModal
+        visible={cashBreakdownVisible}
+        onRequestClose={() => setCashBreakdownVisible(false)}
+      >
+        <View style={styles.modalHeader}>
+          <Text style={styles.modalTitle}>कैश नोट एवं सिक्के (Cash Denominations)</Text>
+          <TouchableOpacity onPress={() => setCashBreakdownVisible(false)}>
+            <Icon name="close" size={24} color="#333" />
+          </TouchableOpacity>
+        </View>
 
-            <ScrollView style={{maxHeight: 320}} keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 20 }}>
-              {renderBreakdownInput('notes500', '₹500')}
-              {renderBreakdownInput('notes200', '₹200')}
-              {renderBreakdownInput('notes100', '₹100')}
-              {renderBreakdownInput('notes50', '₹50')}
-              {renderBreakdownInput('notes20', '₹20')}
-              {renderBreakdownInput('notes10', '₹10')}
-              <View style={styles.divider} />
-              {renderBreakdownInput('coins20', '₹20 सिक्का')}
-              {renderBreakdownInput('coins10', '₹10 सिक्का')}
-              {renderBreakdownInput('coins5', '₹5 सिक्का')}
-              {renderBreakdownInput('coins2', '₹2 सिक्का')}
-              {renderBreakdownInput('coins1', '₹1 सिक्का')}
-            </ScrollView>
+        <View style={{ marginTop: 8 }}>
+          {renderBreakdownInput('notes500', '₹500')}
+          {renderBreakdownInput('notes200', '₹200')}
+          {renderBreakdownInput('notes100', '₹100')}
+          {renderBreakdownInput('notes50', '₹50')}
+          {renderBreakdownInput('notes20', '₹20')}
+          {renderBreakdownInput('notes10', '₹10')}
+          <View style={styles.divider} />
+          {renderBreakdownInput('coins20', '₹20 सिक्का')}
+          {renderBreakdownInput('coins10', '₹10 सिक्का')}
+          {renderBreakdownInput('coins5', '₹5 सिक्का')}
+          {renderBreakdownInput('coins2', '₹2 सिक्का')}
+          {renderBreakdownInput('coins1', '₹1 सिक्का')}
+        </View>
 
-            <View style={styles.modalFooter}>
-              <Text style={styles.modalFooterText}>
-                नोट: ₹{calculateNotesTotal()} / लक्ष्य: ₹{cashNotesAmt}
-                {coinsAmt > 0 ? `  •  सिक्का: ₹${coinsAmt}` : ''}
-              </Text>
-              <CustomButton 
-                title={isCashMatched ? "पुष्टि करें (Confirm)" : "बंद करें (Close)"} 
-                onPress={() => setCashBreakdownVisible(false)} 
-                type={isCashMatched ? "primary" : "secondary"}
-              />
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+        <View style={styles.modalFooter}>
+          <Text style={styles.modalFooterText}>
+            नोट: ₹{calculateNotesTotal()} / लक्ष्य: ₹{cashNotesAmt}
+            {coinsAmt > 0 ? `  •  सिक्का: ₹${coinsAmt}` : ''}
+          </Text>
+          <CustomButton 
+            title={isCashMatched ? "पुष्टि करें (Confirm)" : "बंद करें (Close)"} 
+            onPress={() => setCashBreakdownVisible(false)} 
+            type={isCashMatched ? "primary" : "secondary"}
+          />
+        </View>
+      </ScrollableModal>
 
       {/* 3. Udhari Breakdown Modal */}
-      <Modal visible={udhariBreakdownVisible} animationType="slide" transparent={true}>
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>ग्राहक-वार उधारी (Customer Khata)</Text>
-              <TouchableOpacity onPress={() => setUdhariBreakdownVisible(false)}>
-                <Icon name="close" size={24} color="#333" />
-              </TouchableOpacity>
+      <ScrollableModal
+        visible={udhariBreakdownVisible}
+        onRequestClose={() => setUdhariBreakdownVisible(false)}
+      >
+        <View style={styles.modalHeader}>
+          <Text style={styles.modalTitle}>ग्राहक-वार उधारी (Customer Khata)</Text>
+          <TouchableOpacity onPress={() => setUdhariBreakdownVisible(false)}>
+            <Icon name="close" size={24} color="#333" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={{ marginTop: 8 }}>
+          {udhariBreakdownData.map((item) => (
+            <View key={item.id} style={styles.dynamicRow}>
+              <View style={{flex: 2, marginRight: 8}}>
+                <CustomInput 
+                  placeholder="ग्राहक का नाम" 
+                  value={item.name} 
+                  onChangeText={(t) => handleUdhariBreakdownChange(item.id, 'name', t)} 
+                  style={{marginBottom: 0}} 
+                />
+              </View>
+              <View style={{flex: 1.5, marginRight: 8}}>
+                <CustomInput 
+                  placeholder="राशि (₹)" 
+                  keyboardType="numeric" 
+                  value={item.amount} 
+                  onChangeText={(t) => handleUdhariBreakdownChange(item.id, 'amount', t)} 
+                  style={{marginBottom: 0}} 
+                />
+              </View>
+              {udhariBreakdownData.length > 1 && (
+                <TouchableOpacity onPress={() => removeUdhariEntry(item.id)} style={styles.removeRowBtn}>
+                  <Icon name="trash-outline" size={20} color="#DC2626" />
+                </TouchableOpacity>
+              )}
             </View>
+          ))}
 
-            <ScrollView 
-              style={{maxHeight: 300}} 
-              keyboardShouldPersistTaps="handled" 
-              contentContainerStyle={{ paddingBottom: 24 }}
-              showsVerticalScrollIndicator={true}
-            >
-              {udhariBreakdownData.map((item) => (
-                <View key={item.id} style={styles.dynamicRow}>
-                  <View style={{flex: 2, marginRight: 8}}>
-                    <CustomInput 
-                      placeholder="ग्राहक का नाम" 
-                      value={item.name} 
-                      onChangeText={(t) => handleUdhariBreakdownChange(item.id, 'name', t)} 
-                      style={{marginBottom: 0}} 
-                    />
-                  </View>
-                  <View style={{flex: 1.5, marginRight: 8}}>
-                    <CustomInput 
-                      placeholder="राशि (₹)" 
-                      keyboardType="numeric" 
-                      value={item.amount} 
-                      onChangeText={(t) => handleUdhariBreakdownChange(item.id, 'amount', t)} 
-                      style={{marginBottom: 0}} 
-                    />
-                  </View>
-                  {udhariBreakdownData.length > 1 && (
-                    <TouchableOpacity onPress={() => removeUdhariEntry(item.id)} style={styles.removeRowBtn}>
-                      <Icon name="trash-outline" size={20} color="#DC2626" />
-                    </TouchableOpacity>
-                  )}
-                </View>
-              ))}
+          <TouchableOpacity style={styles.addRowBtn} onPress={addUdhariEntry}>
+            <Icon name="add-circle-outline" size={18} color="#003C8F" />
+            <Text style={styles.addRowBtnText}>+ नया ग्राहक जोड़ें</Text>
+          </TouchableOpacity>
+        </View>
 
-              <TouchableOpacity style={styles.addRowBtn} onPress={addUdhariEntry}>
-                <Icon name="add-circle-outline" size={18} color="#003C8F" />
-                <Text style={styles.addRowBtnText}>+ नया ग्राहक जोड़ें</Text>
-              </TouchableOpacity>
-            </ScrollView>
-
-            <View style={styles.modalFooter}>
-              <Text style={styles.modalFooterText}>
-                कुल: ₹{calculateUdhariBreakdownTotal(udhariBreakdownData)} / लक्ष्य: ₹{udhariAmt}
-              </Text>
-              <CustomButton 
-                title={isUdhariMatched ? "पुष्टि करें (Confirm)" : "बंद करें (Close)"} 
-                onPress={() => setUdhariBreakdownVisible(false)} 
-                type={isUdhariMatched ? "primary" : "secondary"}
-              />
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+        <View style={styles.modalFooter}>
+          <Text style={styles.modalFooterText}>
+            कुल: ₹{calculateUdhariBreakdownTotal(udhariBreakdownData)} / लक्ष्य: ₹{udhariAmt}
+          </Text>
+          <CustomButton 
+            title={isUdhariMatched ? "पुष्टि करें (Confirm)" : "बंद करें (Close)"} 
+            onPress={() => setUdhariBreakdownVisible(false)} 
+            type={isUdhariMatched ? "primary" : "secondary"}
+          />
+        </View>
+      </ScrollableModal>
 
       {/* 4. Expense Breakdown Modal */}
-      <Modal visible={expenseBreakdownVisible} animationType="slide" transparent={true}>
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-          style={styles.modalOverlay}
-        >
-          <View style={[styles.modalContent, { maxHeight: '88%' }]}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>खर्च का विवरण (Pump Expenses)</Text>
-                <Text style={styles.modalSubTitle}>दुकान/पंप का सामान्य खर्च या स्टाफ का वेतन/एडवांस</Text>
-              </View>
-              <TouchableOpacity onPress={() => setExpenseBreakdownVisible(false)}>
-                <Icon name="close" size={24} color="#333" />
-              </TouchableOpacity>
-            </View>
+      <ScrollableModal
+        visible={expenseBreakdownVisible}
+        onRequestClose={() => setExpenseBreakdownVisible(false)}
+      >
+        <View style={styles.modalHeader}>
+          <View>
+            <Text style={styles.modalTitle}>खर्च का विवरण (Pump Expenses)</Text>
+            <Text style={styles.modalSubTitle}>दुकान/पंप का सामान्य खर्च या स्टाफ का वेतन/एडवांस</Text>
+          </View>
+          <TouchableOpacity onPress={() => setExpenseBreakdownVisible(false)}>
+            <Icon name="close" size={24} color="#333" />
+          </TouchableOpacity>
+        </View>
 
-            <ScrollView 
-              style={{ maxHeight: 360 }} 
-              showsVerticalScrollIndicator={true}
-              keyboardShouldPersistTaps="handled"
-              contentContainerStyle={{ paddingBottom: 24 }}
-            >
-              {expenseBreakdownData.map((item) => {
-                const itemType = item.type || 'general';
-                const targetStaffId = item.salesmanId || selectedSalesman;
-                const monthlyAdv = staffMonthlyAdvancesMap[targetStaffId] || 0;
-                const currentAmt = parseFloat(item.amount) || 0;
-                const totalWithCurrent = monthlyAdv + currentAmt;
+        <View style={{ marginTop: 8 }}>
+                {expenseBreakdownData.map((item) => {
+                  const itemType = item.type || 'general';
+                  const targetStaffId = item.salesmanId || selectedSalesman;
+                  const monthlyAdv = staffMonthlyAdvancesMap[targetStaffId] || 0;
+                  const currentAmt = parseFloat(item.amount) || 0;
+                  const totalWithCurrent = monthlyAdv + currentAmt;
 
-                return (
-                  <View key={item.id} style={styles.expenseItemCard}>
-                    {/* Expense Type Selection (General vs Staff Salary) */}
-                    <View style={styles.expenseTypePillRow}>
-                      <TouchableOpacity
-                        style={[styles.expenseTypePill, itemType === 'general' && styles.expenseTypePillActive]}
-                        onPress={() => handleExpenseBreakdownChange(item.id, 'type', 'general')}
-                      >
-                        <Icon 
-                          name="receipt-outline" 
-                          size={14} 
-                          color={itemType === 'general' ? '#003C8F' : '#64748B'} 
-                        />
-                        <Text style={[styles.expenseTypePillText, itemType === 'general' && styles.expenseTypePillTextActive]}>
-                          सामान्य खर्च (General)
-                        </Text>
-                      </TouchableOpacity>
+                  return (
+                    <View key={item.id} style={styles.expenseItemCard}>
+                      {/* Expense Type Selection (General vs Staff Salary) */}
+                      <View style={styles.expenseTypePillRow}>
+                        <TouchableOpacity
+                          style={[styles.expenseTypePill, itemType === 'general' && styles.expenseTypePillActive]}
+                          onPress={() => handleExpenseBreakdownChange(item.id, 'type', 'general')}
+                        >
+                          <Icon 
+                            name="receipt-outline" 
+                            size={14} 
+                            color={itemType === 'general' ? '#003C8F' : '#64748B'} 
+                          />
+                          <Text style={[styles.expenseTypePillText, itemType === 'general' && styles.expenseTypePillTextActive]}>
+                            सामान्य खर्च (General)
+                          </Text>
+                        </TouchableOpacity>
 
-                      <TouchableOpacity
-                        style={[styles.expenseTypePill, itemType === 'salary' && styles.expenseTypePillSalaryActive]}
-                        onPress={() => {
-                          handleExpenseBreakdownChange(item.id, 'type', 'salary');
-                          if (targetStaffId) {
-                            fetchMonthlyAdvanceForStaff(targetStaffId);
-                          }
-                        }}
-                      >
-                        <Icon 
-                          name="person-circle-outline" 
-                          size={14} 
-                          color={itemType === 'salary' ? '#B45309' : '#64748B'} 
-                        />
-                        <Text style={[styles.expenseTypePillText, itemType === 'salary' && styles.expenseTypePillSalaryTextActive]}>
-                          💼 वेतन / एडवांस (Salary)
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
+                        <TouchableOpacity
+                          style={[styles.expenseTypePill, itemType === 'salary' && styles.expenseTypePillSalaryActive]}
+                          onPress={() => {
+                            handleExpenseBreakdownChange(item.id, 'type', 'salary');
+                            if (targetStaffId) {
+                              fetchMonthlyAdvanceForStaff(targetStaffId);
+                            }
+                          }}
+                        >
+                          <Icon 
+                            name="person-circle-outline" 
+                            size={14} 
+                            color={itemType === 'salary' ? '#B45309' : '#64748B'} 
+                          />
+                          <Text style={[styles.expenseTypePillText, itemType === 'salary' && styles.expenseTypePillSalaryTextActive]}>
+                            💼 वेतन / एडवांस (Salary)
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
 
-                    {/* Salary Advance Specific: Staff Picker & Monthly tracker */}
-                    {itemType === 'salary' && (
-                      <View style={styles.salaryAdvanceBox}>
-                        <Text style={styles.salaryStaffLabel}>किस स्टाफ ने वेतन/एडवांस लिया:</Text>
-                        <View style={styles.salaryPickerWrap}>
-                          <Picker
+                      {/* Salary Advance Specific: Staff Picker & Monthly tracker */}
+                      {itemType === 'salary' && (
+                        <View style={styles.salaryAdvanceBox}>
+                          <Text style={styles.salaryStaffLabel}>किस स्टाफ ने वेतन/एडवांस लिया:</Text>
+                          <View style={styles.salaryPickerWrap}>
+                            <Picker
                             selectedValue={targetStaffId}
                             onValueChange={(val) => {
                               const staffObj = effectiveSalesmen.find(s => s.id === val);
@@ -2447,32 +3697,54 @@ export default function DailyEntryScreen({ navigation }) {
                               handleExpenseBreakdownChange(item.id, 'salesmanName', staffObj ? staffObj.name : 'Staff');
                               fetchMonthlyAdvanceForStaff(val);
                             }}
-                            style={styles.salaryPicker}
+                            style={[styles.salaryPicker, { color: '#0F172A', backgroundColor: '#FFFBEB' }]}
                             dropdownIconColor="#D97706"
                             itemStyle={{ color: '#0F172A', fontSize: 14, fontWeight: '700' }}
                             mode="dropdown"
                           >
-                            <Picker.Item label="-- स्टाफ चुनें --" value="" color="#64748B" />
-                            {effectiveSalesmen.map((st) => (
-                              <Picker.Item 
-                                key={st.id} 
-                                label={`👤 ${st.name}`} 
-                                value={st.id} 
-                                color="#0F172A"
-                              />
-                            ))}
+                            <Picker.Item 
+                              label="-- स्टाफ चुनें --" 
+                              value="" 
+                              color="#64748B" 
+                              style={{ color: '#64748B', backgroundColor: '#FFFBEB' }}
+                            />
+                            {effectiveSalesmen.map((st) => {
+                              const roleTag = st.staffType === 'watchman' 
+                                ? `🛡️ ${st.name} (चौकीदार / Watchman)` 
+                                : (st.staffType === 'sweeper' 
+                                    ? `🧹 ${st.name} (सफाईकर्मी / Sweeper)` 
+                                    : `👤 ${st.name} (सेल्समैन)`);
+                              return (
+                                <Picker.Item 
+                                  key={st.id} 
+                                  label={roleTag} 
+                                  value={st.id} 
+                                  color="#0F172A"
+                                  style={{ color: '#0F172A', backgroundColor: '#FFFBEB' }}
+                                />
+                              );
+                            })}
                           </Picker>
                         </View>
 
                         {/* Selected Staff Badge for 100% clarity */}
-                        {targetStaffId ? (
-                          <View style={styles.salarySelectedStaffBadge}>
-                            <Icon name="person" size={14} color="#B45309" />
-                            <Text style={styles.salarySelectedStaffText}>
-                              चयनित स्टाफ: <Text style={{ fontWeight: '800', color: '#92400E' }}>{effectiveSalesmen.find(s => s.id === targetStaffId)?.name || 'Staff'}</Text>
-                            </Text>
-                          </View>
-                        ) : null}
+                        {targetStaffId ? (() => {
+                          const targetStaffObj = effectiveSalesmen.find(s => s.id === targetStaffId);
+                          const targetRoleTag = targetStaffObj?.staffType === 'watchman' 
+                            ? '🛡️ चौकीदार (Watchman)' 
+                            : (targetStaffObj?.staffType === 'sweeper' 
+                                ? '🧹 सफाईकर्मी (Sweeper)' 
+                                : '⛽ सेल्समैन (Salesman)');
+                          return (
+                            <View style={styles.salarySelectedStaffBadge}>
+                              <Icon name="person" size={14} color="#B45309" />
+                              <Text style={styles.salarySelectedStaffText}>
+                                चयनित स्टाफ: <Text style={{ fontWeight: '800', color: '#92400E' }}>{targetStaffObj?.name || 'Staff'}</Text>
+                                <Text style={{ color: '#B45309', fontWeight: '700' }}> [{targetRoleTag}]</Text>
+                              </Text>
+                            </View>
+                          );
+                        })() : null}
 
                         {/* Month Advance Status Card */}
                         <View style={styles.monthAdvanceInfoCard}>
@@ -2492,6 +3764,33 @@ export default function DailyEntryScreen({ navigation }) {
                               </Text>
                             )}
                           </View>
+
+                          {/* Date-wise breakdown of advances taken this month ("kb kb ur kitna liye hain") */}
+                          {staffMonthlyAdvanceRecordsMap[targetStaffId] && staffMonthlyAdvanceRecordsMap[targetStaffId].length > 0 ? (
+                            <View style={styles.advanceRecordsDetailBox}>
+                              <Text style={styles.advanceRecordsDetailTitle}>
+                                📋 कब-कब और कितना लिया ({staffMonthlyAdvanceRecordsMap[targetStaffId].length} बार):
+                              </Text>
+                              {staffMonthlyAdvanceRecordsMap[targetStaffId].map((rec, rIdx) => {
+                                const recDate = rec.timestamp?.toDate 
+                                  ? rec.timestamp.toDate().toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
+                                  : (rec.date || 'Advance');
+                                return (
+                                  <View key={rec.id || rIdx} style={styles.advanceRecordDetailRow}>
+                                    <Text style={styles.advanceRecordDetailDate}>📅 {recDate}</Text>
+                                    <Text style={styles.advanceRecordDetailAmt}>₹{parseFloat(rec.amount || 0).toFixed(0)}</Text>
+                                    <Text style={styles.advanceRecordDetailNote} numberOfLines={1}>
+                                      ({rec.notes || rec.reason || 'एडवांस'})
+                                    </Text>
+                                  </View>
+                                );
+                              })}
+                            </View>
+                          ) : targetStaffId ? (
+                            <Text style={styles.advanceRecordsDetailEmpty}>
+                              (इस महीने में पहले कोई एडवांस नहीं लिया गया है)
+                            </Text>
+                          ) : null}
                         </View>
                       </View>
                     )}
@@ -2529,7 +3828,7 @@ export default function DailyEntryScreen({ navigation }) {
                 <Icon name="add-circle-outline" size={18} color="#003C8F" />
                 <Text style={styles.addRowBtnText}>+ नया खर्चा / एडवांस जोड़ें</Text>
               </TouchableOpacity>
-            </ScrollView>
+            </View>
 
             <View style={styles.modalFooter}>
               <Text style={styles.modalFooterText}>
@@ -2541,76 +3840,70 @@ export default function DailyEntryScreen({ navigation }) {
                 type={isExpenseMatched ? "primary" : "secondary"}
               />
             </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
+          </ScrollableModal>
 
       {/* 6. Admin OTP Verification Modal for Edit Mode */}
-      <Modal visible={otpModalVisible} animationType="slide" transparent={true}>
-        <KeyboardAvoidingView 
-          behavior={Platform.OS === 'ios' ? 'padding' : 'height'} 
-          style={styles.modalOverlay}
-        >
-          <View style={[styles.modalContent, { maxHeight: 520 }]}>
-            <View style={[styles.modalHeader, { borderBottomColor: '#F59E0B' }]}>
-              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                <View style={[styles.modalHeaderIcon, { backgroundColor: '#FEF3C7' }]}>
-                  <Icon name="shield-checkmark" size={24} color="#D97706" />
-                </View>
-                <View style={{ marginLeft: 10 }}>
-                  <Text style={styles.modalTitle}>Admin OTP सत्यापन</Text>
-                  <Text style={styles.modalSubTitle}>एंट्री संशोधन की अनुमति लें</Text>
-                </View>
-              </View>
-              <TouchableOpacity onPress={() => setOtpModalVisible(false)} disabled={otpVerifying}>
-                <Icon name="close-circle" size={26} color="#64748B" />
-              </TouchableOpacity>
+      <ScrollableModal
+        visible={otpModalVisible}
+        onRequestClose={() => setOtpModalVisible(false)}
+      >
+        <View style={[styles.modalHeader, { borderBottomColor: '#F59E0B' }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={[styles.modalHeaderIcon, { backgroundColor: '#FEF3C7' }]}>
+              <Icon name="shield-checkmark" size={24} color="#D97706" />
             </View>
-
-            <ScrollView contentContainerStyle={{ padding: 16 }}>
-              <View style={styles.otpInfoBox}>
-                <Text style={styles.otpInfoTitle}>🔐 OTP सुरक्षा सत्यापन</Text>
-                <Text style={styles.otpInfoDesc}>
-                  स्टाफ <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveSalesmen.find(s => s.id === selectedSalesman)?.name || 'Staff'}</Text> द्वारा मशीन <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{selectedMachineData?.name || selectedMachine}</Text> की आज की एंट्री संशोधित की जा रही है।
-                </Text>
-                <Text style={[styles.otpInfoDesc, { marginTop: 8, color: '#B45309', fontWeight: 'bold' }]}>
-                  👉 Admin Dashboard पर 6 अंकों का OTP जनरेट हो चुका है। कृपया Admin/मालिक से OTP पूछकर यहाँ दर्ज करें।
-                </Text>
-              </View>
-
-              <Text style={styles.otpInputLabel}>6-अंकों का OTP दर्ज करें (Enter 6-Digit OTP) *</Text>
-              <TextInput
-                style={styles.otpTextInput}
-                value={otpInput}
-                onChangeText={(t) => setOtpInput(t.replace(/[^0-9]/g, '').slice(0, 6))}
-                placeholder="• • • • • •"
-                placeholderTextColor="#94A3B8"
-                keyboardType="numeric"
-                maxLength={6}
-                autoFocus={true}
-                textAlign="center"
-              />
-
-              <View style={{ marginTop: 20 }}>
-                <CustomButton 
-                  title="सत्यापित करें और एंट्री सेव करें" 
-                  onPress={handleVerifyAndSubmitEdit} 
-                  loading={otpVerifying} 
-                  type="primary"
-                  icon="checkmark-circle-outline"
-                />
-                <TouchableOpacity 
-                  style={styles.cancelOtpBtn} 
-                  onPress={() => setOtpModalVisible(false)}
-                  disabled={otpVerifying}
-                >
-                  <Text style={styles.cancelOtpBtnText}>रद्द करें (Cancel)</Text>
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
+            <View style={{ marginLeft: 10 }}>
+              <Text style={styles.modalTitle}>Admin OTP सत्यापन</Text>
+              <Text style={styles.modalSubTitle}>एंट्री संशोधन की अनुमति लें</Text>
+            </View>
           </View>
-        </KeyboardAvoidingView>
-      </Modal>
+          <TouchableOpacity onPress={() => setOtpModalVisible(false)} disabled={otpVerifying}>
+            <Icon name="close-circle" size={26} color="#64748B" />
+          </TouchableOpacity>
+        </View>
+
+        <View style={{ paddingVertical: 10 }}>
+          <View style={styles.otpInfoBox}>
+            <Text style={styles.otpInfoTitle}>🔐 OTP सुरक्षा सत्यापन</Text>
+            <Text style={styles.otpInfoDesc}>
+              स्टाफ <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{effectiveSalesmen.find(s => s.id === selectedSalesman)?.name || 'Staff'}</Text> द्वारा मशीन <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{selectedMachineData?.name || selectedMachine}</Text> की आज की एंट्री संशोधित की जा रही है।
+            </Text>
+            <Text style={[styles.otpInfoDesc, { marginTop: 8, color: '#B45309', fontWeight: 'bold' }]}>
+              👉 Admin Dashboard पर 6 अंकों का OTP जनरेट हो चुका है। कृपया Admin/मालिक से OTP पूछकर यहाँ दर्ज करें।
+            </Text>
+          </View>
+
+          <Text style={styles.otpInputLabel}>6-अंकों का OTP दर्ज करें (Enter 6-Digit OTP) *</Text>
+          <TextInput
+            style={styles.otpTextInput}
+            value={otpInput}
+            onChangeText={(t) => setOtpInput(t.replace(/[^0-9]/g, '').slice(0, 6))}
+            placeholder="• • • • • •"
+            placeholderTextColor="#94A3B8"
+            keyboardType="numeric"
+            maxLength={6}
+            autoFocus={true}
+            textAlign="center"
+          />
+
+          <View style={{ marginTop: 20 }}>
+            <CustomButton 
+              title="सत्यापित करें और एंट्री सेव करें" 
+              onPress={handleVerifyAndSubmitEdit} 
+              loading={otpVerifying} 
+              type="primary"
+              icon="checkmark-circle-outline"
+            />
+            <TouchableOpacity 
+              style={styles.cancelOtpBtn} 
+              onPress={() => setOtpModalVisible(false)}
+              disabled={otpVerifying}
+            >
+              <Text style={styles.cancelOtpBtnText}>रद्द करें (Cancel)</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </ScrollableModal>
 
     </SafeAreaView>
   );
@@ -2618,7 +3911,7 @@ export default function DailyEntryScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#F8F9FA' },
-  scrollContent: { padding: 16 },
+  scrollContent: { padding: 16, paddingBottom: 220 },
 
   header: { 
     flexDirection: 'row', 
@@ -2650,7 +3943,7 @@ const styles = StyleSheet.create({
   },
   label: { fontSize: 13, fontWeight: '700', color: '#334155', marginBottom: 6 },
   pickerContainer: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#FFFFFF',
     borderRadius: 10,
     borderWidth: 1.5,
     borderColor: '#CBD5E1',
@@ -2659,7 +3952,7 @@ const styles = StyleSheet.create({
   picker: { 
     height: 52,
     color: '#0F172A',
-    backgroundColor: 'transparent'
+    backgroundColor: '#FFFFFF'
   },
   selectedIndicatorBadge: {
     flexDirection: 'row',
@@ -3032,15 +4325,27 @@ const styles = StyleSheet.create({
   // Modal Styles
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end'
+    backgroundColor: 'rgba(0,0,0,0.6)'
+  },
+  modalScrollOverlay: {
+    flexGrow: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16,
+    paddingVertical: 24
   },
   modalContent: {
     backgroundColor: '#fff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    borderRadius: 20,
     padding: 20,
-    maxHeight: '90%'
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '90%',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10
   },
   modalHeader: {
     flexDirection: 'row',
@@ -3136,9 +4441,63 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     marginBottom: 8
   },
-  breakdownInputLabel: { fontSize: 14, fontWeight: '600', color: '#444', width: 90 },
+  breakdownLabelBadge: {
+    width: 82,
+    justifyContent: 'center'
+  },
+  breakdownInputLabel: { 
+    fontSize: 14, 
+    fontWeight: '700', 
+    color: '#1E293B' 
+  },
+  breakdownMultiply: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#64748B',
+    marginHorizontal: 4
+  },
+  breakdownInputContainer: {
+    width: 80,
+    height: 38,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    justifyContent: 'center'
+  },
+  breakdownTextInput: {
+    height: 38,
+    paddingHorizontal: 8,
+    paddingVertical: 0,
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#0F172A',
+    textAlign: 'center'
+  },
+  breakdownEqual: {
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#94A3B8',
+    marginHorizontal: 4
+  },
+  breakdownTotalBadge: {
+    flex: 1,
+    alignItems: 'flex-end',
+    justifyContent: 'center'
+  },
+  breakdownTotalText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#64748B'
+  },
   divider: { height: 1, backgroundColor: '#E2E8F0', marginVertical: 8 },
   dynamicRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
   removeRowBtn: { padding: 8 },
@@ -3601,5 +4960,618 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#78350F',
     marginTop: 2
+  },
+  advanceRecordsDetailBox: {
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#FDE68A'
+  },
+  advanceRecordsDetailTitle: {
+    fontSize: 10.5,
+    fontWeight: '800',
+    color: '#92400E',
+    marginBottom: 4
+  },
+  advanceRecordDetailRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 2.5,
+    borderBottomWidth: 0.5,
+    borderBottomColor: '#FEF3C7'
+  },
+  advanceRecordDetailDate: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#78350F',
+    width: 68
+  },
+  advanceRecordDetailAmt: {
+    fontSize: 10.5,
+    fontWeight: '900',
+    color: '#B45309',
+    width: 58
+  },
+  advanceRecordDetailNote: {
+    fontSize: 9.5,
+    color: '#92400E',
+    flex: 1
+  },
+  advanceRecordsDetailEmpty: {
+    fontSize: 9.5,
+    color: '#B45309',
+    fontStyle: 'italic',
+    marginTop: 4
+  },
+
+  // Mobil Sale Styles
+  addMobilBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#7C3AED',
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 8
+  },
+  addMobilBtnText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700'
+  },
+  emptyMobilBox: {
+    backgroundColor: '#FAF5FF',
+    borderWidth: 1.5,
+    borderColor: '#DDD6FE',
+    borderStyle: 'dashed',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 8
+  },
+  emptyMobilText: {
+    color: '#6B7280',
+    fontSize: 12,
+    textAlign: 'center',
+    marginTop: 6
+  },
+  mobilItemCard: {
+    backgroundColor: '#FAF5FF',
+    borderWidth: 1,
+    borderColor: '#E9D5FF',
+    borderRadius: 10,
+    padding: 10,
+    marginBottom: 8
+  },
+  mobilItemHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6
+  },
+  mobilItemNumber: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#7C3AED'
+  },
+  mobilTrashBtn: {
+    padding: 4
+  },
+  presetPackRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginBottom: 6
+  },
+  presetPackChip: {
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#C4B5FD',
+    marginRight: 6,
+    marginBottom: 4
+  },
+  presetPackChipActive: {
+    backgroundColor: '#7C3AED',
+    borderColor: '#7C3AED'
+  },
+  presetPackText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#6D28D9'
+  },
+  presetPackTextActive: {
+    color: '#FFFFFF'
+  },
+  mobilTotalBanner: {
+    backgroundColor: '#F3E8FF',
+    borderWidth: 1,
+    borderColor: '#D8B4FE',
+    borderRadius: 8,
+    padding: 10,
+    marginTop: 4,
+    alignItems: 'center'
+  },
+  mobilTotalText: {
+    fontSize: 13,
+    color: '#581C87',
+    fontWeight: '600'
+  },
+
+  // Date Selector Styles
+  dateSelectorCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: '#E2E8F0',
+    padding: 12,
+    marginBottom: 14,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3
+  },
+  dateSelectorHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    flexWrap: 'wrap',
+    gap: 6
+  },
+  dateSelectorTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1E293B',
+    flexShrink: 1
+  },
+  dateDisplayBadge: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#003C8F',
+    backgroundColor: '#EFF6FF',
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    alignSelf: 'center'
+  },
+  datePillsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8
+  },
+  datePill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderRadius: 8,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1.5,
+    borderColor: '#CBD5E1'
+  },
+  datePillActive: {
+    backgroundColor: '#003C8F',
+    borderColor: '#003C8F'
+  },
+  datePillText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  datePillTextActive: {
+    color: '#FFFFFF'
+  },
+
+  // Support Staff Styles
+  supportStaffHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10
+  },
+  supportStaffTitle: {
+    fontSize: 16,
+    fontWeight: '800'
+  },
+  supportStaffSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2
+  },
+  supportInfoBanner: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginBottom: 12
+  },
+  supportInfoName: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A'
+  },
+  supportInfoDate: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  supportInfoPhone: {
+    fontSize: 12,
+    color: '#64748B',
+    marginTop: 3
+  },
+  supportHistoryBox: {
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 14
+  },
+  supportHistoryHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8
+  },
+  supportHistoryTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#92400E'
+  },
+  supportMonthTotalBanner: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FEF3C7',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+    marginBottom: 8
+  },
+  supportMonthTotalLabel: {
+    fontSize: 11,
+    color: '#92400E',
+    fontWeight: '600'
+  },
+  supportMonthTotalVal: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#B45309'
+  },
+  supportCountBadge: {
+    backgroundColor: '#92400E',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12
+  },
+  supportCountBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#FFFFFF'
+  },
+  supportEmptyHistory: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 8
+  },
+  supportEmptyHistoryText: {
+    fontSize: 12,
+    color: '#15803D',
+    marginLeft: 6
+  },
+  supportHistoryList: {
+    marginTop: 4,
+    gap: 6
+  },
+  supportHistoryRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    padding: 8,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#FDE68A'
+  },
+  supportHistoryDate: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569'
+  },
+  supportHistoryModeBadge: {
+    backgroundColor: '#F1F5F9',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 4,
+    marginLeft: 6
+  },
+  supportHistoryModeText: {
+    fontSize: 9.5,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  supportHistoryNotes: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2
+  },
+  supportHistoryAmt: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#B45309'
+  },
+  supportEntryForm: {
+    marginTop: 4
+  },
+  supportEntryTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 8
+  },
+  quickChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 6,
+    marginBottom: 4
+  },
+  quickChipBtn: {
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6
+  },
+  quickChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  supportModeRow: {
+    flexDirection: 'row',
+    gap: 6
+  },
+  supportModeBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    borderRadius: 6,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1'
+  },
+  supportModeBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#475569'
+  },
+  supportNoticeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0F9FF',
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+    borderRadius: 6,
+    padding: 8,
+    marginTop: 10
+  },
+  supportNoticeText: {
+    fontSize: 11,
+    color: '#0369A1',
+    marginLeft: 6,
+    flex: 1
+  },
+
+  // Direct Digital Grid Styles
+  openDigitalMiniBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6
+  },
+  openDigitalMiniText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  digitalDirectCard: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    padding: 10
+  },
+  digitalGridRow: {
+    flexDirection: 'row',
+    gap: 8
+  },
+  digitalGridCol: {
+    flex: 1
+  },
+  digitalInputHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 3,
+    borderLeftWidth: 3,
+    paddingLeft: 4
+  },
+  digitalInputTitle: {
+    fontSize: 11.5,
+    fontWeight: '700'
+  },
+  digitalLiveTotalBar: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#BFDBFE',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginTop: 10
+  },
+  digitalLiveTotalLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  digitalLiveTotalVal: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#003C8F'
+  },
+
+  // Final Reconciliation Card Styles
+  reconcileCard: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#003C8F',
+    padding: 12,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 3
+  },
+  reconcileCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+    paddingBottom: 8,
+    marginBottom: 8
+  },
+  reconcileCardTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#003C8F'
+  },
+  reconcileGrid: {
+    marginBottom: 10
+  },
+  reconcileRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center'
+  },
+  reconcileRowLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#1E293B'
+  },
+  reconcileRowVal: {
+    fontSize: 15,
+    fontWeight: '900'
+  },
+  reconcileSubDetail: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2
+  },
+  reconcileStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderRadius: 8,
+    borderWidth: 1
+  },
+  reconcileStatusBalanced: {
+    backgroundColor: '#F0FDF4',
+    borderColor: '#86EFAC'
+  },
+  reconcileStatusShortage: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FCA5A5'
+  },
+  reconcileStatusExcess: {
+    backgroundColor: '#F0F9FF',
+    borderColor: '#BAE6FD'
+  },
+  reconcileStatusTitle: {
+    fontSize: 13,
+    fontWeight: '800'
+  },
+  reconcileStatusSub: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 1
+  },
+
+  // Custom Digital Payment Styles
+  customDigitalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: 8,
+    padding: 6
+  },
+  customDigitalNameCol: {
+    flex: 1.5,
+    marginRight: 6
+  },
+  customDigitalAmountCol: {
+    flex: 1.2,
+    marginRight: 6
+  },
+  customDigitalDeleteBtn: {
+    padding: 6,
+    justifyContent: 'center',
+    alignItems: 'center'
+  },
+  addDigitalBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#93C5FD',
+    borderStyle: 'dashed',
+    borderRadius: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 12
+  },
+  addDigitalBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#003C8F',
+    marginLeft: 4
+  },
+  quickPresetChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 14,
+    paddingHorizontal: 9,
+    paddingVertical: 4
+  },
+  quickPresetChipText: {
+    fontSize: 11.5,
+    fontWeight: '700',
+    color: '#334155'
   }
 });

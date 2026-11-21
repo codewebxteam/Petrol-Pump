@@ -50,12 +50,15 @@ export default function HistoryScreen() {
         dieselNetSold: Number(item.dieselQuantitySold || (item.fuelType === 'Diesel' ? item.quantitySold : 0) || 0),
         dieselRate: Number(item.dieselRate || (item.fuelType === 'Diesel' ? item.fuelRate : 0) || 0),
         dieselExpected: Number(item.dieselExpectedAmount || (item.fuelType === 'Diesel' ? item.expectedAmount : 0) || 0),
+        totalMobilAmount: Number(item.totalMobilAmount || 0),
+        totalMobilQty: Number(item.totalMobilQty || 0),
+        mobilEntries: item.mobilEntries || [],
         totalLitersSold: Number(item.totalQuantitySold || item.quantitySold || 0),
         totalExpectedAmount: Number(item.expectedTotalAmount || item.expectedAmount || 0),
         cashAmt: Number(item.cashAmount || 0),
         cashNotesAmt: Number(item.cashNotesAmount || 0),
         coinsAmt: Number(item.coinsAmount || 0),
-        digitalAmt: Number(item.onlineAmount || 0) || (Number(item.phonePeAmount || 0) + Number(item.paytmAmount || 0) + Number(item.bharatPeAmount || 0)),
+        digitalAmt: Number(item.onlineAmount || 0) || (Number(item.phonePeAmount || 0) + Number(item.paytmAmount || 0) + Number(item.atmAmount || 0) + Number(item.bobAmount || 0) + Number(item.bharatPeAmount || 0)),
         digitalEntries: item.digitalPaymentsBreakdown || [],
         udhariAmt: Number(item.udhariAmount || 0),
         udhariBreakdown: item.udhariBreakdown || [],
@@ -281,6 +284,26 @@ export default function HistoryScreen() {
               </View>
             </View>
 
+            {/* Additional Mobil Sale (if any) */}
+            {Number(item.totalMobilAmount || 0) > 0 && (
+              <View style={[styles.sectionBlock, { borderLeftWidth: 3, borderLeftColor: '#7C3AED', paddingLeft: 8 }]}>
+                <Text style={[styles.sectionTitle, { color: '#7C3AED' }]}>🛢️ मोबिल बिक्री (Mobil Sale)</Text>
+                <View style={styles.breakdownRow}>
+                  <Text style={styles.breakdownLabel}>Total Mobil Amount:</Text>
+                  <Text style={[styles.breakdownValue, { color: '#7C3AED' }]}>₹{item.totalMobilAmount} ({item.totalMobilQty || item.mobilEntries?.length || 1} Pcs)</Text>
+                </View>
+                {item.mobilEntries && item.mobilEntries.length > 0 && (
+                  <View style={{ marginTop: 4 }}>
+                    {item.mobilEntries.map((m, mi) => (
+                      <Text key={mi} style={{ fontSize: 11, color: '#6B7280', marginBottom: 2 }}>
+                        • {m.packSize || 'मोबिल'}: {m.quantity || 1} Pcs — ₹{m.amount}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+
             {/* Collection Breakdowns */}
             <View style={styles.sectionBlock}>
               <Text style={styles.sectionTitle}>Collection Breakdown</Text>
@@ -299,10 +322,24 @@ export default function HistoryScreen() {
                 <Text style={styles.breakdownLabel}>Paytm:</Text>
                 <Text style={styles.breakdownValue}>₹{item.paytmAmount || 0}</Text>
               </View>
-              <View style={styles.breakdownRow}>
-                <Text style={styles.breakdownLabel}>BharatPe:</Text>
-                <Text style={styles.breakdownValue}>₹{item.bharatPeAmount || 0}</Text>
-              </View>
+              {Number(item.atmAmount || 0) > 0 && (
+                <View style={styles.breakdownRow}>
+                  <Text style={styles.breakdownLabel}>ATM / POS:</Text>
+                  <Text style={styles.breakdownValue}>₹{item.atmAmount || 0}</Text>
+                </View>
+              )}
+              {Number(item.bobAmount || 0) > 0 && (
+                <View style={styles.breakdownRow}>
+                  <Text style={styles.breakdownLabel}>BOB Bank:</Text>
+                  <Text style={styles.breakdownValue}>₹{item.bobAmount || 0}</Text>
+                </View>
+              )}
+              {Number(item.bharatPeAmount || 0) > 0 && (
+                <View style={styles.breakdownRow}>
+                  <Text style={styles.breakdownLabel}>BharatPe:</Text>
+                  <Text style={styles.breakdownValue}>₹{item.bharatPeAmount || 0}</Text>
+                </View>
+              )}
             </View>
 
             {/* Deductions */}

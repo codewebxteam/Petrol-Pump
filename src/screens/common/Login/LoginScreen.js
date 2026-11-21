@@ -102,7 +102,7 @@ export default function LoginScreen({ navigation }) {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.container}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
         <ScrollView contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
           
           <View style={styles.card}>
@@ -180,8 +180,9 @@ export default function LoginScreen({ navigation }) {
         transparent={true}
         animationType="fade"
         onRequestClose={() => setForgotModalVisible(false)}
+        statusBarTranslucent={true}
       >
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalIconWrap}>
               <Icon name="key-outline" size={28} color="#003C8F" />
@@ -230,7 +231,7 @@ export default function LoginScreen({ navigation }) {
               <Text style={styles.modalCancelBtnText}>Cancel</Text>
             </TouchableOpacity>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -239,7 +240,7 @@ export default function LoginScreen({ navigation }) {
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#F8F9FA' },
   container: { flex: 1 },
-  scrollContent: { flexGrow: 1, justifyContent: 'center', padding: 20 },
+  scrollContent: { flexGrow: 1, justifyContent: 'center', padding: 20, paddingBottom: 100 },
   card: { 
     backgroundColor: '#fff', 
     padding: 24, 

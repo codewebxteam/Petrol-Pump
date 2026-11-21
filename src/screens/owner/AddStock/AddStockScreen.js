@@ -1,14 +1,12 @@
-import React, { useState, useEffect, useMemo, useContext } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { 
   View, 
   Text, 
   TextInput, 
   TouchableOpacity, 
   StyleSheet, 
-  Alert, 
   KeyboardAvoidingView, 
   Platform, 
-  Modal,
   ScrollView,
   ActivityIndicator
 } from 'react-native';
@@ -19,51 +17,28 @@ import {
   deleteDoc, 
   increment, 
   onSnapshot, 
-  collection, 
-  addDoc, 
-  query, 
-  orderBy, 
-  limit 
+  collection
 } from 'firebase/firestore';
-import DateTimePicker from '@react-native-community/datetimepicker';
+import { syncAndConsolidateTanks, updateTankStockManual } from '../../../services/dbServices';
 import Icon from '@expo/vector-icons/Ionicons';
 import Toast from 'react-native-toast-message';
 import { db } from '../../../services/firebase';
-import { AuthContext } from '../../../context/AuthContext';
 import CustomAlert from '../../../components/CustomAlert';
-import CustomInput from '../../../components/CustomInput';
 import CustomButton from '../../../components/CustomButton';
+import ScrollableModal from '../../../components/ScrollableModal';
 
 export default function AddStockScreen() {
-  const { userData } = useContext(AuthContext) || {};
   const [tanks, setTanks] = useState([]);
   const [recentAdditions, setRecentAdditions] = useState([]);
   const [selectedTankId, setSelectedTankId] = useState('');
-  
-  // Fuel Addition Form State
-  const [quantityLiters, setQuantityLiters] = useState('');
-  const [tankerNumber, setTankerNumber] = useState('');
-  const [invoiceNumber, setInvoiceNumber] = useState('');
-  const [supplierDepot, setSupplierDepot] = useState('IOCL Baitalpur Depot');
-  const [driverName, setDriverName] = useState('');
-  const [driverPhone, setDriverPhone] = useState('');
-  const [dipReading, setDipReading] = useState('');
-  const [densityReading, setDensityReading] = useState('');
-  const isOwner = userData?.role === 'owner';
-  const [operatorName, setOperatorName] = useState(isOwner ? 'Owner / Admin' : '');
-  const [deliveryDate, setDeliveryDate] = useState(new Date());
-  const [showDatePicker, setShowDatePicker] = useState(false);
-  const [deliveryNotes, setDeliveryNotes] = useState('');
-  
-  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (userData?.role === 'owner') {
-      setOperatorName('Owner / Admin');
-    } else {
-      setOperatorName('');
-    }
-  }, [userData?.role]);
+  // Stock Edit Modal State (Admin Stock / Dip Adjustment)
+  const [showStockEditModal, setShowStockEditModal] = useState(false);
+  const [editTank1Liters, setEditTank1Liters] = useState('');
+  const [editTank1Dip, setEditTank1Dip] = useState('');
+  const [editTank2Liters, setEditTank2Liters] = useState('');
+  const [editTank2Dip, setEditTank2Dip] = useState('');
+  const [savingStockEdit, setSavingStockEdit] = useState(false);
 
   // Modal State for New Tank
   const [isModalVisible, setModalVisible] = useState(false);
@@ -81,8 +56,11 @@ export default function AddStockScreen() {
   const [additionToRevert, setAdditionToRevert] = useState(null);
   const [isRevertingAddition, setIsRevertingAddition] = useState(false);
 
-  // 1. Subscribe to Tanks Collection
+  // 1. Subscribe to Tanks Collection & Onload Deliveries
   useEffect(() => {
+    syncAndConsolidateTanks().catch(() => null);
+
+    // Subscribe to Tanks
     const unsubTanks = onSnapshot(collection(db, 'tanks'), (snapshot) => {
       const list = [];
       snapshot.forEach(d => list.push({ id: d.id, ...d.data() }));
@@ -94,21 +72,38 @@ export default function AddStockScreen() {
       console.warn("Firestore tanks error:", error.message);
     });
 
-    // 2. Subscribe to Recent Fuel Deliveries (tank_logs)
+    // 2. Subscribe to Recent Fuel Deliveries (Only from tank_logs with Liters & Dip in CM)
     const unsubLogs = onSnapshot(collection(db, 'tank_logs'), (snapshot) => {
       const list = [];
       snapshot.forEach(d => {
         const data = d.data();
         if (data.type === 'addition') {
-          list.push({ id: d.id, ...data });
+          const p = Number(data.petrolAdded || data.petrolLiters || 0);
+          const dL = Number(data.dieselAdded || data.dieselLiters || 0);
+          const tot = Number(data.totalAdded || data.addedLiters || (p + dL) || 0);
+          const hasDip = Boolean(data.petrolDip || data.dieselDip);
+
+          // Keep only deliveries that have Liters AND Dip (CM)
+          if ((p > 0 || dL > 0 || tot > 0) && hasDip) {
+            list.push({
+              id: d.id,
+              ...data,
+              petrolAdded: p,
+              dieselAdded: dL,
+              totalAdded: tot,
+              source: data.source || 'onload'
+            });
+          }
         }
       });
+
       list.sort((a, b) => {
         const timeA = a.timestamp?.toDate ? a.timestamp.toDate().getTime() : new Date(a.timestamp || 0).getTime();
         const timeB = b.timestamp?.toDate ? b.timestamp.toDate().getTime() : new Date(b.timestamp || 0).getTime();
         return timeB - timeA;
       });
-      setRecentAdditions(list.slice(0, 15)); // Keep recent 15
+
+      setRecentAdditions(list.slice(0, 30));
     }, (error) => {
       console.warn("Firestore tank_logs error:", error.message);
     });
@@ -119,24 +114,89 @@ export default function AddStockScreen() {
     };
   }, []);
 
-  // Canonical default tanks if empty
+  // Canonical default tanks (Strictly deduplicates so Tank-1 and Tank 1 never create 4 tanks)
   const effectiveTanks = useMemo(() => {
-    if (tanks.length > 0) return tanks;
+    const map = new Map();
+    (tanks || []).forEach(t => {
+      const isD = t.id === 'Tank-2' || t.fuelType === 'Diesel' || String(t.id).includes('2');
+      const canonicalKey = isD ? 'Tank-2' : (t.id === 'Tank-1' || String(t.id).includes('1') ? 'Tank-1' : t.id);
+      if (!map.has(canonicalKey) || t.id === 'Tank-1' || t.id === 'Tank-2') {
+        map.set(canonicalKey, {
+          ...t,
+          id: canonicalKey,
+          tankId: isD ? 'Tank 2 (Diesel - HSD)' : 'Tank 1 (Petrol - MS)',
+          name: isD ? 'Tank 2 (Diesel)' : 'Tank 1 (Petrol)',
+          fuelType: isD ? 'Diesel' : 'Petrol'
+        });
+      }
+    });
+
+    const uniqueList = Array.from(map.values());
+    if (uniqueList.length > 0) return uniqueList;
     return [
-      { id: 'Tank-1', tankId: 'Tank 1 (Petrol - MS)', fuelType: 'Petrol', petrolStock: 18450, stock: 18450, dieselStock: 0 },
-      { id: 'Tank-2', tankId: 'Tank 2 (Diesel - HSD)', fuelType: 'Diesel', petrolStock: 0, dieselStock: 22800, stock: 22800 }
+      { id: 'Tank-1', tankId: 'Tank 1 (Petrol - MS)', name: 'Tank 1 (Petrol)', fuelType: 'Petrol', petrolStock: 0, stock: 0, dieselStock: 0 },
+      { id: 'Tank-2', tankId: 'Tank 2 (Diesel - HSD)', name: 'Tank 2 (Diesel)', fuelType: 'Diesel', petrolStock: 0, dieselStock: 0, stock: 0 }
     ];
   }, [tanks]);
 
   const currentTankId = selectedTankId || effectiveTanks[0]?.id || 'Tank-1';
-  const activeTank = effectiveTanks.find(t => t.id === currentTankId) || effectiveTanks[0];
-  const isDieselSelected = (activeTank?.id === 'Tank-2') || 
-                           (activeTank?.fuelType?.toLowerCase() === 'diesel') || 
-                           String(activeTank?.tankId || activeTank?.id || '').toLowerCase().includes('diesel') ||
-                           String(activeTank?.tankId || activeTank?.id || '').includes('2');
 
-  const handleQuantityChange = (val) => {
-    setQuantityLiters(val);
+  // Open Admin Stock Edit Modal
+  const handleOpenStockEdit = () => {
+    const t1 = effectiveTanks.find(t => t.id === 'Tank-1' || t.fuelType === 'Petrol' || String(t.id).includes('1'));
+    const t2 = effectiveTanks.find(t => t.id === 'Tank-2' || t.fuelType === 'Diesel' || String(t.id).includes('2'));
+    const s1 = parseFloat(t1?.petrolStock !== undefined ? t1.petrolStock : (t1?.stock || 0));
+    const s2 = parseFloat(t2?.dieselStock !== undefined ? t2.dieselStock : (t2?.stock || 0));
+    setEditTank1Liters(s1 ? s1.toFixed(0) : '0');
+    setEditTank1Dip(t1?.dipReading ? String(t1.dipReading).replace(/[^0-9.]/g, '') : '');
+    setEditTank2Liters(s2 ? s2.toFixed(0) : '0');
+    setEditTank2Dip(t2?.dipReading ? String(t2.dipReading).replace(/[^0-9.]/g, '') : '');
+    setShowStockEditModal(true);
+  };
+
+  // Save Admin Stock Edit
+  const handleSaveStockEdit = async () => {
+    const pVal = parseFloat(editTank1Liters);
+    const dVal = parseFloat(editTank2Liters);
+
+    if (isNaN(pVal) || pVal < 0 || isNaN(dVal) || dVal < 0) {
+      Toast.show({ 
+        type: 'error', 
+        text1: 'त्रुटि', 
+        text2: 'कृपया दोनों टैंकों का वैध स्टॉक (Liters) दर्ज करें।' 
+      });
+      return;
+    }
+
+    setSavingStockEdit(true);
+    try {
+      await updateTankStockManual({
+        tankId: 'Tank-1',
+        liters: pVal,
+        dipReading: editTank1Dip,
+        reason: 'Master Config Stock Edit',
+        adjustedBy: 'Owner / Admin'
+      });
+
+      await updateTankStockManual({
+        tankId: 'Tank-2',
+        liters: dVal,
+        dipReading: editTank2Dip,
+        reason: 'Master Config Stock Edit',
+        adjustedBy: 'Owner / Admin'
+      });
+
+      Toast.show({ 
+        type: 'success', 
+        text1: 'टैंक स्टॉक अपडेट हुआ ✅', 
+        text2: `Tank 1: ${pVal}L (${editTank1Dip || '-'} cm) | Tank 2: ${dVal}L (${editTank2Dip || '-'} cm)` 
+      });
+      setShowStockEditModal(false);
+    } catch (err) {
+      Toast.show({ type: 'error', text1: 'Error', text2: err.message });
+    } finally {
+      setSavingStockEdit(false);
+    }
   };
 
   // Create a New Custom Tank
@@ -177,100 +237,6 @@ export default function AddStockScreen() {
     }
   };
 
-  // Submit Fuel Addition / Tank Unloading
-  const handleUpdateStock = async () => {
-    const targetTankId = currentTankId;
-    if (!targetTankId) {
-      Toast.show({ type: 'error', text1: 'Error', text2: 'Please select a tank first.' });
-      return;
-    }
-
-    const qty = parseFloat(quantityLiters) || 0;
-    if (qty <= 0) {
-      Toast.show({ 
-        type: 'error', 
-        text1: 'Invalid Quantity', 
-        text2: `Please enter a valid quantity in Liters for ${isDieselSelected ? 'Diesel' : 'Petrol'}.` 
-      });
-      return;
-    }
-
-    const fuelName = isDieselSelected ? 'Diesel' : 'Petrol';
-
-    setLoading(true);
-    try {
-      // 1. Update Tank Stock in Firestore
-      const tankRef = doc(db, 'tanks', targetTankId);
-      const updateData = {
-        stock: increment(qty),
-        lastAddedLiters: qty,
-        lastInvoiceNumber: invoiceNumber.trim() || null,
-        lastTankerNumber: tankerNumber.trim() || null,
-        lastUpdated: new Date()
-      };
-
-      if (isDieselSelected) {
-        updateData.dieselStock = increment(qty);
-      } else {
-        updateData.petrolStock = increment(qty);
-      }
-
-      await setDoc(tankRef, updateData, { merge: true });
-
-      // If tank has dual key (e.g. Tank-1 and Tank 1), sync canonical representation
-      const altId = targetTankId.includes('-') ? targetTankId.replace('-', ' ') : targetTankId.replace(' ', '-');
-      if (tanks.some(t => t.id === altId)) {
-        await setDoc(doc(db, 'tanks', altId), updateData, { merge: true }).catch(() => null);
-      }
-
-      // 2. Record detailed log in tank_logs
-      await addDoc(collection(db, 'tank_logs'), {
-        type: 'addition',
-        tankId: targetTankId,
-        tankName: activeTank?.tankName || activeTank?.tankId || targetTankId,
-        fuelType: fuelName,
-        petrolAdded: isDieselSelected ? 0 : qty,
-        dieselAdded: isDieselSelected ? qty : 0,
-        tankerNumber: tankerNumber.trim().toUpperCase() || 'N/A',
-        invoiceNumber: invoiceNumber.trim().toUpperCase() || 'N/A',
-        supplier: supplierDepot.trim() || 'IOCL Baitalpur Depot',
-        driverName: driverName.trim() || 'N/A',
-        driverPhone: driverPhone.trim() || 'N/A',
-        dipReading: dipReading.trim() ? `${dipReading.trim()} cm` : null,
-        density: densityReading.trim() ? `${densityReading.trim()} kg/m³` : null,
-        operatorName: operatorName.trim() || '',
-        note: deliveryNotes.trim() || `Unloaded ${qty} L ${fuelName} into ${targetTankId}`,
-        timestamp: deliveryDate,
-        createdAt: new Date()
-      });
-
-      Toast.show({ 
-        type: 'success', 
-        text1: 'Fuel Stock Added!', 
-        text2: `+${qty} L ${fuelName} added to ${targetTankId} successfully.` 
-      });
-
-      // Clear Form Fields
-      setQuantityLiters('');
-      setInvoiceNumber('');
-      setTankerNumber('');
-      setDriverName('');
-      setDriverPhone('');
-      setDipReading('');
-      setDensityReading('');
-      setDeliveryNotes('');
-      setDeliveryDate(new Date());
-      if (!isOwner) {
-        setOperatorName('');
-      }
-    } catch (error) {
-      console.error("Error adding stock:", error);
-      Toast.show({ type: 'error', text1: 'Update Failed', text2: error.message || 'Could not update stock.' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
   // Revert / Delete an accidental Fuel Addition
   const handleConfirmRevertAddition = (item) => {
     setAdditionToRevert(item);
@@ -280,38 +246,57 @@ export default function AddStockScreen() {
   const executeRevertAddition = async () => {
     if (!additionToRevert) return;
     setIsRevertingAddition(true);
+
     try {
-      const { id, tankId, addedLiters, petrolAdded, dieselAdded, fuelType } = additionToRevert;
-      const qtyToDeduct = parseFloat(addedLiters || (fuelType === 'Diesel' ? dieselAdded : petrolAdded) || 0);
+      const item = additionToRevert;
+      const pL = Number(item.petrolAdded || item.petrolLiters || 0);
+      const dL = Number(item.dieselAdded || item.dieselLiters || 0);
+      const tot = Number(item.totalAdded || item.addedLiters || (pL + dL) || 0);
 
-      if (qtyToDeduct > 0 && tankId) {
-        const isDiesel = fuelType === 'Diesel' || dieselAdded > 0;
-        const tankRef = doc(db, 'tanks', tankId);
-        const rollbackData = {
-          stock: increment(-qtyToDeduct),
+      // Rollback Petrol from Tank-1
+      if (pL > 0) {
+        await setDoc(doc(db, 'tanks', 'Tank-1'), {
+          id: 'Tank-1',
+          name: 'Tank 1 (Petrol)',
+          fuelType: 'Petrol',
+          petrolStock: increment(-pL),
+          stock: increment(-pL),
           lastUpdated: new Date()
-        };
-        if (isDiesel) {
-          rollbackData.dieselStock = increment(-qtyToDeduct);
-        } else {
-          rollbackData.petrolStock = increment(-qtyToDeduct);
-        }
-        await setDoc(tankRef, rollbackData, { merge: true }).catch(() => null);
-
-        // Also check alternate ID
-        const altId = tankId.includes('-') ? tankId.replace('-', ' ') : tankId.replace(' ', '-');
-        if (tanks.some(t => t.id === altId)) {
-          await setDoc(doc(db, 'tanks', altId), rollbackData, { merge: true }).catch(() => null);
-        }
+        }, { merge: true }).catch(() => null);
+        await deleteDoc(doc(db, 'tanks', 'Tank 1')).catch(() => null);
       }
 
-      // Delete the log
-      await deleteDoc(doc(db, 'tank_logs', id));
+      // Rollback Diesel from Tank-2
+      if (dL > 0) {
+        await setDoc(doc(db, 'tanks', 'Tank-2'), {
+          id: 'Tank-2',
+          name: 'Tank 2 (Diesel)',
+          fuelType: 'Diesel',
+          dieselStock: increment(-dL),
+          stock: increment(-dL),
+          lastUpdated: new Date()
+        }, { merge: true }).catch(() => null);
+        await deleteDoc(doc(db, 'tanks', 'Tank 2')).catch(() => null);
+      }
+
+      // If single tank
+      if (pL === 0 && dL === 0 && tot > 0 && item.tankId) {
+        const isD = item.fuelType === 'Diesel';
+        await setDoc(doc(db, 'tanks', item.tankId), {
+          stock: increment(-tot),
+          [isD ? 'dieselStock' : 'petrolStock']: increment(-tot),
+          lastUpdated: new Date()
+        }, { merge: true }).catch(() => null);
+      }
+
+      // Delete log
+      await deleteDoc(doc(db, 'tank_logs', item.id)).catch(() => null);
+      await deleteDoc(doc(db, 'sample_labels', item.id)).catch(() => null);
 
       Toast.show({
         type: 'success',
-        text1: 'Delivery Reverted',
-        text2: `Deducted ${qtyToDeduct} L and removed log entry.`
+        text1: 'डिलीवरी हटाई गई',
+        text2: 'स्टॉक रोलबैक कर दिया गया है।'
       });
     } catch (err) {
       console.error("Error reverting addition:", err);
@@ -329,6 +314,24 @@ export default function AddStockScreen() {
     setAlertVisible(true);
   };
 
+  const confirmDeleteTank = async () => {
+    if (!tankToDelete) return;
+    setIsDeletingTank(true);
+    try {
+      await deleteDoc(doc(db, 'tanks', tankToDelete));
+      Toast.show({ type: 'success', text1: 'Tank Deleted', text2: 'The storage tank has been removed.' });
+      if (selectedTankId === tankToDelete) {
+        setSelectedTankId(effectiveTanks.find(t => t.id !== tankToDelete)?.id || '');
+      }
+    } catch (error) {
+      Toast.show({ type: 'error', text1: 'Error', text2: error.message });
+    } finally {
+      setIsDeletingTank(false);
+      setAlertVisible(false);
+      setTankToDelete(null);
+    }
+  };
+
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.container}>
       <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
@@ -339,8 +342,8 @@ export default function AddStockScreen() {
             <Icon name="water" size={24} color="#003C8F" />
           </View>
           <View style={{ flex: 1, marginLeft: 12 }}>
-            <Text style={styles.mainTitle}>Fuel Addition & Tank Management</Text>
-            <Text style={styles.mainSubTitle}>Record fuel tanker deliveries, invoices, and update tank stock</Text>
+            <Text style={styles.headerTitle}>Storage Tanks & Fuel Inventory</Text>
+            <Text style={styles.headerSub}>Manage underground tanks, view stock levels and Onload deliveries</Text>
           </View>
         </View>
 
@@ -348,8 +351,8 @@ export default function AddStockScreen() {
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Tank Inventory Status</Text>
           <TouchableOpacity style={styles.newTankPillBtn} onPress={() => setModalVisible(true)}>
-            <Icon name="add-circle" size={16} color="#003C8F" style={{ marginRight: 4 }} />
-            <Text style={styles.newTankPillBtnText}>Add New Tank</Text>
+            <Icon name="add-circle" size={15} color="#003C8F" style={{ marginRight: 4 }} />
+            <Text style={styles.newTankPillBtnText}>Add Tank</Text>
           </TouchableOpacity>
         </View>
 
@@ -357,7 +360,11 @@ export default function AddStockScreen() {
           {effectiveTanks.map((tank) => {
             const isDiesel = tank.id === 'Tank-2' || tank.fuelType === 'Diesel' || String(tank.tankId || tank.id).toLowerCase().includes('diesel') || String(tank.id).includes('2');
             const isSelected = tank.id === currentTankId;
-            const stockVal = parseFloat(tank.stock !== undefined ? tank.stock : (isDiesel ? tank.dieselStock : tank.petrolStock) || 0);
+            const stockVal = parseFloat(
+              (isDiesel ? tank.dieselStock : tank.petrolStock) !== undefined 
+                ? (isDiesel ? tank.dieselStock : tank.petrolStock) 
+                : (tank.stock !== undefined ? tank.stock : 0)
+            );
             const capacityVal = parseFloat(tank.capacity || (isDiesel ? tank.dieselCapacity : tank.petrolCapacity) || 20000);
             const percent = Math.min(100, Math.max(0, (stockVal / capacityVal) * 100));
 
@@ -380,11 +387,22 @@ export default function AddStockScreen() {
                     </Text>
                   </View>
                   
-                  {tank.id !== 'Tank-1' && tank.id !== 'Tank-2' && (
-                    <TouchableOpacity onPress={() => handleDeleteTank(tank.id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                      <Icon name="trash-outline" size={16} color="#DC2626" />
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {/* Direct Stock Edit Pencil Button on Card */}
+                    <TouchableOpacity 
+                      onPress={handleOpenStockEdit}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      style={styles.cardMiniEditBtn}
+                    >
+                      <Icon name="create-outline" size={15} color="#003C8F" />
                     </TouchableOpacity>
-                  )}
+
+                    {tank.id !== 'Tank-1' && tank.id !== 'Tank-2' && (
+                      <TouchableOpacity onPress={() => handleDeleteTank(tank.id)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                        <Icon name="trash-outline" size={15} color="#DC2626" />
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 </View>
 
                 <Text style={styles.tankCardName}>
@@ -397,6 +415,10 @@ export default function AddStockScreen() {
                   </Text>
                   <Text style={styles.stockValueUnit}> Liters</Text>
                 </View>
+
+                {tank.dipReading ? (
+                  <Text style={styles.cardDipText}>📏 Dip: {tank.dipReading}</Text>
+                ) : null}
 
                 {/* Progress Bar */}
                 <View style={styles.tankProgressBarTrack}>
@@ -413,193 +435,16 @@ export default function AddStockScreen() {
                 <View style={styles.tankProgressLabels}>
                   <Text style={styles.tankProgressText}>{percent.toFixed(0)}% Full</Text>
                 </View>
-                
-                {isSelected && (
-                  <View style={[styles.selectedBanner, { backgroundColor: isDiesel ? '#003C8F' : '#FF6F00' }]}>
-                    <Icon name="checkmark-circle" size={12} color="#fff" style={{ marginRight: 4 }} />
-                    <Text style={styles.selectedBannerText}>Active for Fuel Delivery</Text>
-                  </View>
-                )}
               </TouchableOpacity>
             );
           })}
         </View>
 
-        {/* Section 2: Fuel Unloading / Stock Addition Form */}
-        <View style={styles.formContainer}>
-          <View style={styles.formHeaderRow}>
-            <View>
-              <Text style={styles.formHeaderTitle}>Tanker Delivery & Stock Entry</Text>
-              <Text style={styles.formHeaderSub}>
-                Unloading into: <Text style={{ fontWeight: '900', color: isDieselSelected ? '#003C8F' : '#FF6F00' }}>
-                  {activeTank?.tankName || activeTank?.tankId || currentTankId} ({isDieselSelected ? 'Diesel' : 'Petrol'})
-                </Text>
-              </Text>
-            </View>
-            <View style={[styles.fuelBadgeLarge, { backgroundColor: isDieselSelected ? '#003C8F' : '#FF6F00' }]}>
-              <Icon name={isDieselSelected ? 'water' : 'flame'} size={18} color="#fff" />
-            </View>
-          </View>
-
-          {/* Quantity in Liters (Primary Input) */}
-          <View style={styles.primaryInputBox}>
-            <Text style={styles.inputSectionLabel}>FUEL QUANTITY UNLOADED (LITERS) *</Text>
-            <View style={styles.quantityRow}>
-              <TextInput
-                style={[styles.bigQuantityInput, { borderColor: isDieselSelected ? '#003C8F' : '#FF6F00' }]}
-                placeholder="e.g. 5000"
-                value={quantityLiters}
-                onChangeText={handleQuantityChange}
-                keyboardType="numeric"
-                placeholderTextColor="#94A3B8"
-              />
-              <View style={[styles.unitBadge, { backgroundColor: isDieselSelected ? '#E0EDFF' : '#FFF3E0' }]}>
-                <Text style={[styles.unitBadgeText, { color: isDieselSelected ? '#003C8F' : '#FF6F00' }]}>LITERS</Text>
-              </View>
-            </View>
-          </View>
-
-          {/* Tanker Truck No & Invoice No in 2-column layout */}
-          <View style={styles.inputRowTwoCol}>
-            <View style={{ flex: 1, marginRight: 8 }}>
-              <CustomInput
-                label="Tanker / TT Truck No."
-                placeholder="e.g. UP 53 BT 4567"
-                value={tankerNumber}
-                onChangeText={setTankerNumber}
-                autoCapitalize="characters"
-                leftIcon="bus-outline"
-              />
-            </View>
-            <View style={{ flex: 1, marginLeft: 8 }}>
-              <CustomInput
-                label="Invoice / Challan No."
-                placeholder="e.g. IOCL-98421"
-                value={invoiceNumber}
-                onChangeText={setInvoiceNumber}
-                autoCapitalize="characters"
-                leftIcon="receipt-outline"
-              />
-            </View>
-          </View>
-
-          {/* Supplier Oil Depot */}
-          <CustomInput
-            label="Supplier / Supply Depot"
-            placeholder="e.g. IOCL Baitalpur Depot"
-            value={supplierDepot}
-            onChangeText={setSupplierDepot}
-            leftIcon="business-outline"
-          />
-
-          {/* Driver Name & Driver Phone Number */}
-          <View style={styles.inputRowTwoCol}>
-            <View style={{ flex: 1, marginRight: 8 }}>
-              <CustomInput
-                label="Driver Name"
-                placeholder="e.g. Ramesh Kumar"
-                value={driverName}
-                onChangeText={setDriverName}
-                leftIcon="person-outline"
-              />
-            </View>
-            <View style={{ flex: 1, marginLeft: 8 }}>
-              <CustomInput
-                label="Driver Phone Number"
-                placeholder="e.g. 9876543210"
-                value={driverPhone}
-                onChangeText={setDriverPhone}
-                keyboardType="phone-pad"
-                leftIcon="call-outline"
-              />
-            </View>
-          </View>
-
-          {/* Optional Inspection: Dip & Density */}
-          <View style={styles.inputRowTwoCol}>
-            <View style={{ flex: 1, marginRight: 8 }}>
-              <CustomInput
-                label="Dip Level (cm)"
-                placeholder="e.g. 142.5"
-                value={dipReading}
-                onChangeText={setDipReading}
-                keyboardType="numeric"
-                leftIcon="analytics-outline"
-              />
-            </View>
-            <View style={{ flex: 1, marginLeft: 8 }}>
-              <CustomInput
-                label="Density @ 15°C (kg/m³)"
-                placeholder="e.g. 745.0"
-                value={densityReading}
-                onChangeText={setDensityReading}
-                keyboardType="numeric"
-                leftIcon="speedometer-outline"
-              />
-            </View>
-          </View>
-
-          {/* Operator Name & Date */}
-          <View style={styles.inputRowTwoCol}>
-            <View style={{ flex: 1, marginRight: 8 }}>
-              <CustomInput
-                label="Received By (Operator)"
-                placeholder="e.g. Received By Name (Optional)"
-                value={operatorName}
-                onChangeText={setOperatorName}
-                leftIcon="person-outline"
-              />
-            </View>
-            <View style={{ flex: 1, marginLeft: 8 }}>
-              <Text style={styles.fieldHeaderLabel}>Delivery Date</Text>
-              <TouchableOpacity 
-                style={styles.datePickerBtn}
-                onPress={() => setShowDatePicker(true)}
-              >
-                <Icon name="calendar-outline" size={18} color="#003C8F" style={{ marginRight: 6 }} />
-                <Text style={styles.datePickerBtnText}>
-                  {deliveryDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
-                </Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-
-          {showDatePicker && (
-            <DateTimePicker
-              value={deliveryDate}
-              mode="date"
-              display="default"
-              onChange={(event, date) => {
-                setShowDatePicker(false);
-                if (date) setDeliveryDate(date);
-              }}
-            />
-          )}
-
-          {/* Remarks / Notes */}
-          <CustomInput
-            label="Remarks / Delivery Notes"
-            placeholder="e.g. Chamber 1 & 2 fully unloaded without shortage"
-            value={deliveryNotes}
-            onChangeText={setDeliveryNotes}
-            leftIcon="document-text-outline"
-          />
-
-          {/* Submit Button */}
-          <CustomButton
-            title={loading ? "Updating Tank Stock..." : `+ Unload ${isDieselSelected ? 'Diesel' : 'Petrol'} & Add Stock`}
-            onPress={handleUpdateStock}
-            loading={loading}
-            type={isDieselSelected ? 'primary' : 'warning'}
-            style={{ marginTop: 16 }}
-          />
-        </View>
-
-        {/* Section 3: Live Recent Fuel Additions & Deliveries */}
+        {/* Section 2: Live Recent Fuel Additions & Deliveries (From Onload) */}
         <View style={[styles.sectionHeaderRow, { marginTop: 24 }]}>
           <View>
             <Text style={styles.sectionTitle}>Recent Tanker Deliveries</Text>
-            <Text style={styles.sectionSubTitle}>Live ledger of fuel unloadings (tap trash to revert)</Text>
+            <Text style={styles.sectionSubTitle}>Onload द्वारा अनलोड हुए ईंधन की लाइव हिस्ट्री (Delivery History)</Text>
           </View>
         </View>
 
@@ -607,31 +452,48 @@ export default function AddStockScreen() {
           <View style={styles.emptyAdditionsBox}>
             <Icon name="receipt-outline" size={40} color="#CBD5E1" />
             <Text style={styles.emptyAdditionsTitle}>No Recent Fuel Additions</Text>
-            <Text style={styles.emptyAdditionsSub}>Unload your first fuel tanker using the form above to view live records.</Text>
+            <Text style={styles.emptyAdditionsSub}>Onload से लॉरी अनलोड होते ही उसका पूरा विवरण यहाँ दिखाई देगा।</Text>
           </View>
         ) : (
           recentAdditions.map((item) => {
-            const isDiesel = item.fuelType === 'Diesel' || item.dieselAdded > 0;
-            const liters = item.addedLiters || (isDiesel ? item.dieselAdded : item.petrolAdded) || 0;
+            const pL = Number(item.petrolAdded || item.petrolLiters || 0);
+            const dL = Number(item.dieselAdded || item.dieselLiters || 0);
+            const totalL = Number(item.totalAdded) || (pL + dL) || Number(item.addedLiters) || 0;
             const dateStr = item.timestamp?.toDate ? item.timestamp.toDate().toLocaleString('en-IN', {
               day: '2-digit',
               month: 'short',
               year: 'numeric',
               hour: '2-digit',
               minute: '2-digit'
-            }) : 'N/A';
+            }) : (item.sampleDate ? `${item.sampleDate} ${item.sampleTime || ''}` : 'N/A');
 
             return (
-              <View key={item.id} style={[styles.additionCard, { borderLeftColor: isDiesel ? '#003C8F' : '#FF6F00' }]}>
+              <View 
+                key={item.id} 
+                style={[
+                  styles.additionCard, 
+                  { borderLeftColor: (pL > 0 && dL > 0) ? '#0F766E' : (dL > 0 ? '#003C8F' : '#FF6F00') }
+                ]}
+              >
                 <View style={styles.additionCardTop}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                    <View style={[styles.additionBadge, { backgroundColor: isDiesel ? '#E0EDFF' : '#FFF3E0' }]}>
-                      <Icon name={isDiesel ? 'water' : 'flame'} size={14} color={isDiesel ? '#003C8F' : '#FF6F00'} style={{ marginRight: 4 }} />
-                      <Text style={[styles.additionBadgeText, { color: isDiesel ? '#003C8F' : '#FF6F00' }]}>
-                        {isDiesel ? 'Diesel (HSD)' : 'Petrol (MS)'}
-                      </Text>
-                    </View>
-                    <Text style={styles.additionTankLabel}>{item.tankId || 'Tank'}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                    {pL > 0 && (
+                      <View style={[styles.additionBadge, { backgroundColor: '#FFF3E0' }]}>
+                        <Icon name="flame" size={13} color="#FF6F00" style={{ marginRight: 3 }} />
+                        <Text style={[styles.additionBadgeText, { color: '#FF6F00' }]}>MS (Petrol)</Text>
+                      </View>
+                    )}
+                    {dL > 0 && (
+                      <View style={[styles.additionBadge, { backgroundColor: '#E0EDFF' }]}>
+                        <Icon name="water" size={13} color="#003C8F" style={{ marginRight: 3 }} />
+                        <Text style={[styles.additionBadgeText, { color: '#003C8F' }]}>HSD (Diesel)</Text>
+                      </View>
+                    )}
+                    {pL === 0 && dL === 0 && (
+                      <View style={[styles.additionBadge, { backgroundColor: '#F1F5F9' }]}>
+                        <Text style={[styles.additionBadgeText, { color: '#475569' }]}>Fuel Addition</Text>
+                      </View>
+                    )}
                   </View>
 
                   <TouchableOpacity 
@@ -639,62 +501,69 @@ export default function AddStockScreen() {
                     style={styles.revertBtn}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                   >
-                    <Icon name="trash-outline" size={18} color="#EF4444" />
+                    <Icon name="trash-outline" size={17} color="#EF4444" />
                   </TouchableOpacity>
                 </View>
 
                 {/* Liters Added Highlight */}
                 <View style={styles.additionMainRow}>
-                  <View>
-                    <Text style={styles.additionLitersLabel}>UNLOADED QUANTITY</Text>
-                    <Text style={[styles.additionLitersValue, { color: isDiesel ? '#003C8F' : '#FF6F00' }]}>
-                      +{parseFloat(liters).toLocaleString('en-IN')} L
-                    </Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.additionLitersLabel}>DELIVERY QUANTITY (अनलोड मात्रा)</Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginTop: 2 }}>
+                      {pL > 0 && (
+                        <Text style={[styles.additionLitersValue, { color: '#FF6F00', fontSize: 16 }]}>
+                          MS: +{pL.toLocaleString('en-IN')} L{item.petrolDip ? ` (${String(item.petrolDip).includes('cm') ? String(item.petrolDip).trim() : `${String(item.petrolDip).trim()} cm`})` : ''}
+                        </Text>
+                      )}
+                      {dL > 0 && (
+                        <Text style={[styles.additionLitersValue, { color: '#003C8F', fontSize: 16 }]}>
+                          HSD: +{dL.toLocaleString('en-IN')} L{item.dieselDip ? ` (${String(item.dieselDip).includes('cm') ? String(item.dieselDip).trim() : `${String(item.dieselDip).trim()} cm`})` : ''}
+                        </Text>
+                      )}
+                      {pL === 0 && dL === 0 && totalL > 0 && (
+                        <Text style={[styles.additionLitersValue, { color: '#003C8F', fontSize: 16 }]}>
+                          +{totalL.toLocaleString('en-IN')} L
+                        </Text>
+                      )}
+                    </View>
                   </View>
                 </View>
 
                 {/* Details Grid */}
                 <View style={styles.additionDetailsGrid}>
-                  {item.tankerNumber && item.tankerNumber !== 'N/A' && (
+                  {(item.tankerNumber || item.tankLorryNo) && (item.tankerNumber !== 'N/A' && item.tankLorryNo !== 'N/A') ? (
                     <View style={styles.detailItem}>
                       <Icon name="bus-outline" size={13} color="#64748B" style={{ marginRight: 4 }} />
-                      <Text style={styles.detailText}>TT: <Text style={styles.detailBold}>{item.tankerNumber}</Text></Text>
+                      <Text style={styles.detailText}>TT: <Text style={styles.detailBold}>{item.tankerNumber || item.tankLorryNo}</Text></Text>
                     </View>
-                  )}
+                  ) : null}
 
-                  {item.invoiceNumber && item.invoiceNumber !== 'N/A' && (
+                  {(item.invoiceNumber || item.invoiceNo) && (item.invoiceNumber !== 'N/A' && item.invoiceNo !== 'N/A') ? (
                     <View style={styles.detailItem}>
                       <Icon name="receipt-outline" size={13} color="#64748B" style={{ marginRight: 4 }} />
-                      <Text style={styles.detailText}>Inv: <Text style={styles.detailBold}>{item.invoiceNumber}</Text></Text>
+                      <Text style={styles.detailText}>Inv: <Text style={styles.detailBold}>{item.invoiceNumber || item.invoiceNo}</Text></Text>
                     </View>
-                  )}
+                  ) : null}
 
-                  {item.driverName && item.driverName !== 'N/A' && (
+                  {item.driverName && item.driverName !== 'N/A' ? (
                     <View style={styles.detailItem}>
                       <Icon name="person-outline" size={13} color="#64748B" style={{ marginRight: 4 }} />
                       <Text style={styles.detailText}>Driver: <Text style={styles.detailBold}>{item.driverName}</Text></Text>
                     </View>
-                  )}
+                  ) : null}
 
-                  {item.driverPhone && item.driverPhone !== 'N/A' && (
-                    <View style={styles.detailItem}>
-                      <Icon name="call-outline" size={13} color="#64748B" style={{ marginRight: 4 }} />
-                      <Text style={styles.detailText}>Mob: <Text style={styles.detailBold}>{item.driverPhone}</Text></Text>
-                    </View>
-                  )}
-
-                  {item.supplier && (
+                  {(item.supplier || item.supplyLocation) ? (
                     <View style={styles.detailItem}>
                       <Icon name="business-outline" size={13} color="#64748B" style={{ marginRight: 4 }} />
-                      <Text style={styles.detailText}>{item.supplier}</Text>
+                      <Text style={styles.detailText}>{item.supplyLocation || item.supplier}</Text>
                     </View>
-                  )}
+                  ) : null}
                 </View>
 
-                {/* Footer with Operator & Date */}
+                {/* Footer with Source & Date */}
                 <View style={styles.additionFooter}>
                   <Text style={styles.footerDateText}>{dateStr}</Text>
-                  <Text style={styles.footerOperatorText}>Recv: {item.operatorName || '—'}</Text>
+                  <Text style={styles.footerOperatorText}>Source: Onload Decanting</Text>
                 </View>
               </View>
             );
@@ -704,199 +573,587 @@ export default function AddStockScreen() {
       </ScrollView>
 
       {/* Modal for Creating New Tank */}
-      <Modal visible={isModalVisible} transparent={true} animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={styles.modalHeaderRow}>
-              <Text style={styles.modalTitle}>Add New Storage Tank</Text>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <Icon name="close-circle-outline" size={24} color="#94A3B8" />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.modalSubtitle}>Configure a new underground storage tank (e.g. Tank 3, Tank 4).</Text>
-            
-            <TextInput
-              style={styles.modalInput}
-              placeholder="e.g. TANK 3"
-              value={newTankName}
-              onChangeText={setNewTankName}
-              autoCapitalize="characters"
-              placeholderTextColor="#94A3B8"
-            />
+      <ScrollableModal visible={isModalVisible} onRequestClose={() => setModalVisible(false)}>
+        <View style={styles.modalHeaderRow}>
+          <Text style={styles.modalTitle}>Add New Storage Tank</Text>
+          <TouchableOpacity onPress={() => setModalVisible(false)}>
+            <Icon name="close-circle-outline" size={24} color="#94A3B8" />
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.modalSubtitle}>Configure a new underground storage tank (e.g. Tank 3, Tank 4).</Text>
+        
+        <TextInput
+          style={styles.modalInput}
+          placeholder="e.g. TANK 3"
+          value={newTankName}
+          onChangeText={setNewTankName}
+          autoCapitalize="characters"
+        />
 
-            <Text style={[styles.fieldHeaderLabel, { marginBottom: 8 }]}>Fuel Type:</Text>
-            <View style={{ flexDirection: 'row', marginBottom: 20 }}>
-              <TouchableOpacity 
-                style={[
-                  styles.fuelTypeSelectBtn, 
-                  newTankFuelType === 'Petrol' && { backgroundColor: '#FF6F00', borderColor: '#FF6F00' }
-                ]}
-                onPress={() => setNewTankFuelType('Petrol')}
-              >
-                <Icon name="flame" size={16} color={newTankFuelType === 'Petrol' ? '#fff' : '#FF6F00'} style={{ marginRight: 4 }} />
-                <Text style={{ color: newTankFuelType === 'Petrol' ? '#fff' : '#FF6F00', fontWeight: 'bold' }}>Petrol (MS)</Text>
-              </TouchableOpacity>
-              <View style={{ width: 10 }} />
-              <TouchableOpacity 
-                style={[
-                  styles.fuelTypeSelectBtn, 
-                  newTankFuelType === 'Diesel' && { backgroundColor: '#003C8F', borderColor: '#003C8F' }
-                ]}
-                onPress={() => setNewTankFuelType('Diesel')}
-              >
-                <Icon name="water" size={16} color={newTankFuelType === 'Diesel' ? '#fff' : '#003C8F'} style={{ marginRight: 4 }} />
-                <Text style={{ color: newTankFuelType === 'Diesel' ? '#fff' : '#003C8F', fontWeight: 'bold' }}>Diesel (HSD)</Text>
-              </TouchableOpacity>
+        <Text style={styles.modalLabel}>Select Fuel Type</Text>
+        <View style={styles.pickerBox}>
+          <Picker
+            selectedValue={newTankFuelType}
+            onValueChange={(val) => setNewTankFuelType(val)}
+          >
+            <Picker.Item label="Petrol (MS)" value="Petrol" />
+            <Picker.Item label="Diesel (HSD)" value="Diesel" />
+          </Picker>
+        </View>
+
+        <CustomButton
+          title={creatingTank ? "Creating Tank..." : "Create Tank"}
+          onPress={handleAddNewTank}
+          loading={creatingTank}
+          style={{ marginTop: 12 }}
+        />
+      </ScrollableModal>
+
+      {/* Modal for Direct Stock Edit / Dip Adjustment */}
+      <ScrollableModal visible={showStockEditModal} onRequestClose={() => setShowStockEditModal(false)}>
+        <View style={styles.stockModalHeader}>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={styles.stockModalIconCircle}>
+              <Icon name="create" size={20} color="#003C8F" />
             </View>
-            
-            <CustomButton
-              title={creatingTank ? "Creating Tank..." : "Create Tank"}
-              onPress={handleAddNewTank}
-              loading={creatingTank}
-              type="primary"
-            />
+            <View style={{ marginLeft: 10 }}>
+              <Text style={styles.stockModalTitle}>टैंक स्टॉक / Dip सुधार</Text>
+              <Text style={styles.stockModalSubtitle}>Live Stock & Dip Reading Edit</Text>
+            </View>
+          </View>
+          <TouchableOpacity onPress={() => setShowStockEditModal(false)}>
+            <Icon name="close-circle" size={24} color="#64748B" />
+          </TouchableOpacity>
+        </View>
+
+        {/* Tank 1 (Petrol) Edit */}
+        <View style={styles.stockModalTankSection}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+            <Icon name="flame" size={16} color="#E65100" style={{ marginRight: 6 }} />
+            <Text style={styles.stockModalTankTitle}>Tank 1 (Petrol - MS)</Text>
+          </View>
+          <View style={styles.stockModalRow}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.stockModalFieldLabel}>स्टॉक (Liters) *</Text>
+              <TextInput
+                style={styles.stockModalInput}
+                value={editTank1Liters}
+                onChangeText={setEditTank1Liters}
+                keyboardType="numeric"
+                placeholder="0"
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
+            <View style={{ flex: 1, marginLeft: 8 }}>
+              <Text style={styles.stockModalFieldLabel}>Dip (cm)</Text>
+              <TextInput
+                style={styles.stockModalInput}
+                value={editTank1Dip}
+                onChangeText={setEditTank1Dip}
+                keyboardType="numeric"
+                placeholder="उदा. 142.5"
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
           </View>
         </View>
-      </Modal>
 
-      {/* Delete Tank Confirmation */}
+        {/* Tank 2 (Diesel) Edit */}
+        <View style={[styles.stockModalTankSection, { borderColor: '#BFDBFE', backgroundColor: '#EFF6FF' }]}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+            <Icon name="water" size={16} color="#003C8F" style={{ marginRight: 6 }} />
+            <Text style={[styles.stockModalTankTitle, { color: '#003C8F' }]}>Tank 2 (Diesel - HSD)</Text>
+          </View>
+          <View style={styles.stockModalRow}>
+            <View style={{ flex: 1, marginRight: 8 }}>
+              <Text style={styles.stockModalFieldLabel}>स्टॉक (Liters) *</Text>
+              <TextInput
+                style={styles.stockModalInput}
+                value={editTank2Liters}
+                onChangeText={setEditTank2Liters}
+                keyboardType="numeric"
+                placeholder="0"
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
+            <View style={{ flex: 1, marginLeft: 8 }}>
+              <Text style={styles.stockModalFieldLabel}>Dip (cm)</Text>
+              <TextInput
+                style={styles.stockModalInput}
+                value={editTank2Dip}
+                onChangeText={setEditTank2Dip}
+                keyboardType="numeric"
+                placeholder="उदा. 158.0"
+                placeholderTextColor="#94A3B8"
+              />
+            </View>
+          </View>
+        </View>
+
+        {/* Action Buttons */}
+        <View style={styles.stockModalBtnRow}>
+          <TouchableOpacity 
+            style={styles.stockModalCancelBtn} 
+            onPress={() => setShowStockEditModal(false)}
+            disabled={savingStockEdit}
+          >
+            <Text style={styles.stockModalCancelBtnText}>रद्द करें</Text>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={styles.stockModalSaveBtn} 
+            onPress={handleSaveStockEdit}
+            disabled={savingStockEdit}
+          >
+            {savingStockEdit ? (
+              <ActivityIndicator size="small" color="#fff" />
+            ) : (
+              <Text style={styles.stockModalSaveBtnText}>सुधार सेव करें (Save)</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </ScrollableModal>
+
+      {/* Delete Confirmation Alert */}
       <CustomAlert
         visible={alertVisible}
         title="Delete Tank"
-        message={`Are you sure you want to delete ${tankToDelete}? This cannot be undone.`}
-        isDestructive={true}
+        message={`Are you sure you want to permanently delete "${tankToDelete}"? This cannot be undone.`}
+        confirmText={isDeletingTank ? "Deleting..." : "Delete"}
         cancelText="Cancel"
-        confirmText="Delete Tank"
-        loading={isDeletingTank}
-        onCancel={() => {
-          setAlertVisible(false);
-          setTankToDelete(null);
-        }}
-        onConfirm={async () => {
-          setIsDeletingTank(true);
-          try {
-            await deleteDoc(doc(db, 'tanks', tankToDelete));
-            Toast.show({ type: 'success', text1: 'Deleted', text2: `Tank ${tankToDelete} was removed.` });
-            if (selectedTankId === tankToDelete) {
-              setSelectedTankId('');
-            }
-          } catch (error) {
-            Toast.show({ type: 'error', text1: 'Error', text2: error.message });
-          } finally {
-            setAlertVisible(false);
-            setIsDeletingTank(false);
-            setTankToDelete(null);
-          }
-        }}
+        type="danger"
+        onConfirm={confirmDeleteTank}
+        onCancel={() => setAlertVisible(false)}
       />
 
-      {/* Revert Fuel Addition Confirmation */}
+      {/* Revert Fuel Addition Confirmation Alert */}
       <CustomAlert
         visible={revertAlertVisible}
-        title="Revert Fuel Delivery?"
-        message={
-          additionToRevert 
-            ? `Do you want to revert this entry? ${additionToRevert.addedLiters || additionToRevert.petrolAdded || additionToRevert.dieselAdded} Liters will be automatically deducted from ${additionToRevert.tankId} inventory.`
-            : ''
-        }
-        isDestructive={true}
-        cancelText="Keep"
-        confirmText="Revert & Deduct"
-        loading={isRevertingAddition}
-        onCancel={() => {
-          setRevertAlertVisible(false);
-          setAdditionToRevert(null);
-        }}
+        title="Revert Delivery"
+        message={additionToRevert ? `Are you sure you want to delete this delivery entry and deduct stock from the tank?` : ''}
+        confirmText={isRevertingAddition ? "Reverting..." : "Yes, Revert"}
+        cancelText="Cancel"
+        type="danger"
         onConfirm={executeRevertAddition}
+        onCancel={() => setRevertAlertVisible(false)}
       />
-
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8FAFC' },
-  scrollContent: { padding: 16, paddingBottom: 40 },
+  container: {
+    flex: 1,
+    backgroundColor: '#F8F9FA'
+  },
+  scrollContent: {
+    padding: 16,
+    paddingBottom: 40
+  },
+  headerBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    padding: 14,
+    borderRadius: 12,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3
+  },
+  headerIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#E0EDFF',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  headerTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#003C8F'
+  },
+  headerSub: {
+    fontSize: 11.5,
+    color: '#64748B',
+    marginTop: 2
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12
+  },
+  sectionTitle: {
+    fontSize: 14.5,
+    fontWeight: '800',
+    color: '#1E293B'
+  },
+  sectionSubTitle: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 2
+  },
+  newTankPillBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#E0EDFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#BFDBFE'
+  },
+  newTankPillBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#003C8F'
+  },
+  tanksGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    marginBottom: 14
+  },
+  tankCard: {
+    flex: 1,
+    minWidth: '47%',
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1.5,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 3
+  },
+  tankCardSelected: {
+    borderWidth: 2
+  },
+  tankCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8
+  },
+  fuelPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6
+  },
+  fuelPillText: {
+    fontSize: 11,
+    fontWeight: '800'
+  },
+  cardMiniEditBtn: {
+    padding: 4,
+    backgroundColor: '#F1F5F9',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#CBD5E1'
+  },
+  tankCardName: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#0F172A',
+    marginBottom: 6
+  },
+  stockValueRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginBottom: 4
+  },
+  stockValueNumber: {
+    fontSize: 22,
+    fontWeight: '900'
+  },
+  stockValueUnit: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#64748B'
+  },
+  cardDipText: {
+    fontSize: 11.5,
+    color: '#475569',
+    fontWeight: '700',
+    marginBottom: 6
+  },
+  tankProgressBarTrack: {
+    height: 6,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginTop: 4
+  },
+  tankProgressBarFill: {
+    height: '100%',
+    borderRadius: 3
+  },
+  tankProgressLabels: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 4
+  },
+  tankProgressText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#64748B'
+  },
 
-  headerBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', padding: 16, borderRadius: 14, elevation: 1, borderWidth: 1, borderColor: '#E2E8F0', marginBottom: 20 },
-  headerIconCircle: { width: 48, height: 48, borderRadius: 24, backgroundColor: '#E0EDFF', alignItems: 'center', justifyContent: 'center' },
-  mainTitle: { fontSize: 18, fontWeight: '900', color: '#0F172A' },
-  mainSubTitle: { fontSize: 12, color: '#64748B', marginTop: 2, lineHeight: 16 },
+  // Recent Tanker Deliveries Section
+  emptyAdditionsBox: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: '#E2E8F0'
+  },
+  emptyAdditionsTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#475569',
+    marginTop: 8
+  },
+  emptyAdditionsSub: {
+    fontSize: 11.5,
+    color: '#94A3B8',
+    textAlign: 'center',
+    marginTop: 4
+  },
+  additionCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
+    borderLeftWidth: 4,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2
+  },
+  additionCardTop: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8
+  },
+  additionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6
+  },
+  additionBadgeText: {
+    fontSize: 11,
+    fontWeight: '800'
+  },
+  revertBtn: {
+    padding: 4
+  },
+  additionMainRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8
+  },
+  additionLitersLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#64748B',
+    textTransform: 'uppercase'
+  },
+  additionLitersValue: {
+    fontSize: 15,
+    fontWeight: '900'
+  },
+  additionDetailsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 12,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9'
+  },
+  detailItem: {
+    flexDirection: 'row',
+    alignItems: 'center'
+  },
+  detailText: {
+    fontSize: 11.5,
+    color: '#475569'
+  },
+  detailBold: {
+    fontWeight: '700',
+    color: '#1E293B'
+  },
+  additionFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 0.5,
+    borderTopColor: '#E2E8F0'
+  },
+  footerDateText: {
+    fontSize: 10.5,
+    color: '#64748B',
+    fontWeight: '600'
+  },
+  footerOperatorText: {
+    fontSize: 10.5,
+    color: '#003C8F',
+    fontWeight: '700'
+  },
 
-  sectionHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
-  sectionTitle: { fontSize: 16, fontWeight: '900', color: '#1E293B' },
-  sectionSubTitle: { fontSize: 12, color: '#64748B', marginTop: 1 },
-  newTankPillBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#EFF6FF', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, borderWidth: 1, borderColor: '#BFDBFE' },
-  newTankPillBtnText: { fontSize: 12, fontWeight: 'bold', color: '#003C8F' },
+  // Modal Styles (Add Tank)
+  modalHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: '#0F172A'
+  },
+  modalSubtitle: {
+    fontSize: 12,
+    color: '#64748B',
+    marginBottom: 14
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    padding: 10,
+    fontSize: 14,
+    color: '#0F172A',
+    backgroundColor: '#fff',
+    marginBottom: 12
+  },
+  modalLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#334155',
+    marginBottom: 4
+  },
+  pickerBox: {
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    backgroundColor: '#fff',
+    marginBottom: 16
+  },
 
-  tanksGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 20 },
-  tankCard: { width: '48.5%', backgroundColor: '#fff', padding: 14, borderRadius: 14, borderWidth: 2, borderColor: '#E2E8F0', elevation: 2, marginBottom: 12 },
-  tankCardSelected: { shadowColor: '#003C8F', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.15, shadowRadius: 4 },
-  tankCardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  fuelPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
-  fuelPillText: { fontSize: 11, fontWeight: 'bold' },
-  tankCardName: { fontSize: 15, fontWeight: '900', color: '#1E293B' },
-
-  stockValueRow: { flexDirection: 'row', alignItems: 'baseline', marginTop: 6, marginBottom: 8 },
-  stockValueNumber: { fontSize: 20, fontWeight: '900' },
-  stockValueUnit: { fontSize: 11, color: '#64748B', fontWeight: 'bold' },
-
-  tankProgressBarTrack: { height: 6, backgroundColor: '#E2E8F0', borderRadius: 3, overflow: 'hidden' },
-  tankProgressBarFill: { height: '100%', borderRadius: 3 },
-  tankProgressLabels: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 },
-  tankProgressText: { fontSize: 10, color: '#94A3B8', fontWeight: 'bold' },
-
-  selectedBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginTop: 10, paddingVertical: 3, borderRadius: 6 },
-  selectedBannerText: { fontSize: 10, color: '#fff', fontWeight: 'bold' },
-
-  formContainer: { backgroundColor: '#fff', borderRadius: 16, padding: 18, elevation: 2, borderWidth: 1, borderColor: '#E2E8F0' },
-  formHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#F1F5F9', paddingBottom: 12, marginBottom: 16 },
-  formHeaderTitle: { fontSize: 17, fontWeight: '900', color: '#0F172A' },
-  formHeaderSub: { fontSize: 12, color: '#64748B', marginTop: 2 },
-  fuelBadgeLarge: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
-
-  primaryInputBox: { backgroundColor: '#F8FAFC', padding: 12, borderRadius: 12, borderWidth: 1, borderColor: '#CBD5E1', marginBottom: 14 },
-  inputSectionLabel: { fontSize: 11, fontWeight: '900', color: '#475569', marginBottom: 6, letterSpacing: 0.5 },
-  quantityRow: { flexDirection: 'row', alignItems: 'center' },
-  bigQuantityInput: { flex: 1, height: 48, backgroundColor: '#fff', borderRadius: 10, borderWidth: 2, paddingHorizontal: 14, fontSize: 22, fontWeight: '900', color: '#0F172A' },
-  unitBadge: { height: 48, paddingHorizontal: 14, borderRadius: 10, alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
-  unitBadgeText: { fontSize: 13, fontWeight: '900' },
-
-  inputRowTwoCol: { flexDirection: 'row', alignItems: 'center' },
-  fieldHeaderLabel: { fontSize: 12, fontWeight: 'bold', color: '#475569', marginBottom: 6, marginLeft: 2 },
-  datePickerBtn: { height: 48, backgroundColor: '#fff', borderRadius: 10, borderWidth: 1, borderColor: '#CBD5E1', flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, marginBottom: 12 },
-  datePickerBtnText: { fontSize: 14, fontWeight: 'bold', color: '#1E293B' },
-
-  emptyAdditionsBox: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff', borderRadius: 14, padding: 24, borderWidth: 1, borderColor: '#E2E8F0' },
-  emptyAdditionsTitle: { fontSize: 15, fontWeight: 'bold', color: '#64748B', marginTop: 10 },
-  emptyAdditionsSub: { fontSize: 12, color: '#94A3B8', textAlign: 'center', marginTop: 4, lineHeight: 16 },
-
-  additionCard: { backgroundColor: '#fff', borderRadius: 14, padding: 14, elevation: 1, borderWidth: 1, borderColor: '#E2E8F0', borderLeftWidth: 5, marginBottom: 12 },
-  additionCardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  additionBadge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
-  additionBadgeText: { fontSize: 11, fontWeight: 'bold' },
-  additionTankLabel: { fontSize: 13, fontWeight: '900', color: '#334155', marginLeft: 8 },
-  revertBtn: { padding: 4 },
-
-  additionMainRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end', borderBottomWidth: 1, borderBottomColor: '#F1F5F9', paddingBottom: 8, marginBottom: 8 },
-  additionLitersLabel: { fontSize: 9, fontWeight: '800', color: '#94A3B8', letterSpacing: 0.5 },
-  additionLitersValue: { fontSize: 20, fontWeight: '900', marginTop: 2 },
-  additionAmountValue: { fontSize: 15, fontWeight: '900', color: '#0F172A', marginTop: 2 },
-
-  additionDetailsGrid: { flexDirection: 'row', flexWrap: 'wrap', marginBottom: 8 },
-  detailItem: { flexDirection: 'row', alignItems: 'center', marginRight: 14, marginTop: 4 },
-  detailText: { fontSize: 12, color: '#64748B' },
-  detailBold: { fontWeight: 'bold', color: '#1E293B' },
-
-  additionFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6, borderTopWidth: 1, borderTopColor: '#F8FAFC' },
-  footerDateText: { fontSize: 11, color: '#94A3B8' },
-  footerOperatorText: { fontSize: 11, color: '#64748B', fontWeight: '600' },
-
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  modalContainer: { backgroundColor: '#fff', width: '100%', borderRadius: 16, padding: 20, elevation: 5 },
-  modalHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#003C8F' },
-  modalSubtitle: { fontSize: 13, color: '#64748B', marginBottom: 16 },
-  modalInput: { backgroundColor: '#F8FAFC', padding: 12, borderRadius: 10, borderWidth: 1, borderColor: '#CBD5E1', fontSize: 16, fontWeight: 'bold', marginBottom: 16 },
-  fuelTypeSelectBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: 10, borderWidth: 1.5, borderColor: '#CBD5E1' }
+  // Stock Edit Modal Styles
+  stockModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#E2E8F0',
+    paddingBottom: 10,
+    marginBottom: 14
+  },
+  stockModalIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#E0EDFF',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  stockModalTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#0F172A'
+  },
+  stockModalSubtitle: {
+    fontSize: 10.5,
+    color: '#64748B'
+  },
+  stockModalTankSection: {
+    backgroundColor: '#FFF7ED',
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 12
+  },
+  stockModalTankTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#C2410C'
+  },
+  stockModalRow: {
+    flexDirection: 'row',
+    alignItems: 'center'
+  },
+  stockModalFieldLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#475569',
+    marginBottom: 4
+  },
+  stockModalInput: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 14,
+    color: '#0F172A',
+    fontWeight: '700'
+  },
+  stockModalBtnRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0'
+  },
+  stockModalCancelBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 9,
+    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1'
+  },
+  stockModalCancelBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#475569'
+  },
+  stockModalSaveBtn: {
+    paddingHorizontal: 18,
+    paddingVertical: 9,
+    borderRadius: 8,
+    backgroundColor: '#003C8F',
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  stockModalSaveBtnText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#fff'
+  }
 });

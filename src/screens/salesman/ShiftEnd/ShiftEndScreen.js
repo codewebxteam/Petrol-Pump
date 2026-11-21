@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, ActivityIndicator, SafeAreaView, Modal, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ScrollView, ActivityIndicator, SafeAreaView, Modal, KeyboardAvoidingView, Platform, TextInput } from 'react-native';
 import { Picker } from '@react-native-picker/picker';
 import { collection, query, where, getDocs, doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../../services/firebase';
@@ -25,13 +25,13 @@ export default function ShiftEndScreen({ navigation }) {
   
   const [onlineBreakdownVisible, setOnlineBreakdownVisible] = useState(false);
   const [onlineBreakdownData, setOnlineBreakdownData] = useState({
-    phonePe: '', paytm: '', bharatPe: ''
+    paytm: '', phonePe: '', atm: '', bob: ''
   });
   const [isOnlineMatched, setIsOnlineMatched] = useState(false);
   const [onlineBreakdownTotal, setOnlineBreakdownTotal] = useState(0);
 
   const calculateOnlineBreakdownTotal = (data = onlineBreakdownData) => {
-    return (parseFloat(data.phonePe) || 0) + (parseFloat(data.paytm) || 0) + (parseFloat(data.bharatPe) || 0);
+    return (parseFloat(data.paytm) || 0) + (parseFloat(data.phonePe) || 0) + (parseFloat(data.atm) || 0) + (parseFloat(data.bob) || 0);
   };
 
   const handleOnlineBreakdownChange = (key, value) => {
@@ -267,9 +267,10 @@ export default function ShiftEndScreen({ navigation }) {
         closingMeterReading: cMeter,
         totalQuantitySold: netSoldLiters,
         cashAmount: cashAmt,
-        phonePeAmount: onlineAmt > 0 ? (parseFloat(onlineBreakdownData.phonePe) || 0) : 0,
         paytmAmount: onlineAmt > 0 ? (parseFloat(onlineBreakdownData.paytm) || 0) : 0,
-        bharatPeAmount: onlineAmt > 0 ? (parseFloat(onlineBreakdownData.bharatPe) || 0) : 0,
+        phonePeAmount: onlineAmt > 0 ? (parseFloat(onlineBreakdownData.phonePe) || 0) : 0,
+        atmAmount: onlineAmt > 0 ? (parseFloat(onlineBreakdownData.atm) || 0) : 0,
+        bobAmount: onlineAmt > 0 ? (parseFloat(onlineBreakdownData.bob) || 0) : 0,
         udhariAmount: udhariAmt,
         expenses: expenseAmt,
         testingQuantity: testQty,
@@ -299,14 +300,14 @@ export default function ShiftEndScreen({ navigation }) {
     <View style={styles.breakdownInputWrapper} key={key}>
       <Text style={styles.breakdownInputLabel}>{label}</Text>
       <View style={{flexDirection: 'row', alignItems: 'center'}}>
-         <Text style={{marginRight: 5, color: '#555'}}>x</Text>
-         <CustomInput 
+         <Text style={{marginRight: 6, color: '#555', fontWeight: 'bold'}}>×</Text>
+         <TextInput 
            keyboardType="numeric" 
            value={breakdownData[key]} 
            onChangeText={(t) => handleBreakdownChange(key, t)} 
            placeholder="0" 
-           style={{marginBottom: 0, flex: 1}} 
-           inputStyle={{padding: 8, height: 40}}
+           placeholderTextColor="#94A3B8"
+           style={styles.breakdownTextInput}
          />
       </View>
     </View>
@@ -340,17 +341,36 @@ export default function ShiftEndScreen({ navigation }) {
             <Picker
               selectedValue={selectedSalesman}
               onValueChange={(val) => setSelectedSalesman(val)}
-              style={styles.picker}
+              style={[styles.picker, { color: '#0F172A', backgroundColor: '#FFFFFF' }]}
               dropdownIconColor="#003C8F"
               itemStyle={{ color: '#0F172A' }}
               mode="dropdown"
             >
-              <Picker.Item label="Select Staff..." value="" color="#64748B" />
+              <Picker.Item 
+                label="Select Staff..." 
+                value="" 
+                color="#64748B" 
+                style={{ color: '#64748B', backgroundColor: '#FFFFFF' }}
+              />
               {salesmen.map(s => (
-                <Picker.Item key={s.id} label={s.name} value={s.id} color="#0F172A" />
+                <Picker.Item 
+                  key={s.id} 
+                  label={s.name} 
+                  value={s.id} 
+                  color="#0F172A" 
+                  style={{ color: '#0F172A', backgroundColor: '#FFFFFF' }}
+                />
               ))}
             </Picker>
           </View>
+          {selectedSalesman ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0FDF4', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, marginTop: 8, borderWidth: 1, borderColor: '#BBF7D0' }}>
+              <Icon name="checkmark-circle" size={16} color="#16A34A" />
+              <Text style={{ fontSize: 13, color: '#15803D', marginLeft: 6 }}>
+                Selected Staff: <Text style={{ fontWeight: 'bold', color: '#003C8F' }}>{salesmen.find(s => s.id === selectedSalesman)?.name || 'Staff'}</Text>
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         {loading && <View style={styles.center}><ActivityIndicator size="large" color="#FF6F00" /></View>}
@@ -546,8 +566,8 @@ export default function ShiftEndScreen({ navigation }) {
         </>
         )}
 
-        <Modal visible={cashBreakdownVisible} transparent={true} animationType="slide">
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <Modal visible={cashBreakdownVisible} transparent={true} animationType="fade" statusBarTranslucent={true}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Cash Breakdown</Text>
@@ -598,8 +618,8 @@ export default function ShiftEndScreen({ navigation }) {
           </KeyboardAvoidingView>
         </Modal>
 
-        <Modal visible={onlineBreakdownVisible} transparent={true} animationType="slide">
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <Modal visible={onlineBreakdownVisible} transparent={true} animationType="fade" statusBarTranslucent={true}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Online Breakdown</Text>
@@ -614,9 +634,10 @@ export default function ShiftEndScreen({ navigation }) {
               </View>
               
               <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
-                 {renderOnlineBreakdownInput('phonePe', 'PhonePe (₹)', 'phone-portrait')}
-                 {renderOnlineBreakdownInput('paytm', 'Paytm (₹)', 'phone-portrait')}
-                 {renderOnlineBreakdownInput('bharatPe', 'BharatPe (₹)', 'phone-portrait')}
+                 {renderOnlineBreakdownInput('paytm', 'Paytm (₹)', 'wallet-outline')}
+                 {renderOnlineBreakdownInput('phonePe', 'PhonePe (₹)', 'phone-portrait-outline')}
+                 {renderOnlineBreakdownInput('atm', 'ATM / POS स्वाइप (₹)', 'card-outline')}
+                 {renderOnlineBreakdownInput('bob', 'BOB Bank (₹)', 'business-outline')}
               </ScrollView>
 
               <View style={styles.modalFooter}>
@@ -635,8 +656,8 @@ export default function ShiftEndScreen({ navigation }) {
           </KeyboardAvoidingView>
         </Modal>
 
-        <Modal visible={udhariBreakdownVisible} transparent={true} animationType="slide">
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <Modal visible={udhariBreakdownVisible} transparent={true} animationType="fade" statusBarTranslucent={true}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Credit / Udhari Breakdown</Text>
@@ -710,8 +731,8 @@ export default function ShiftEndScreen({ navigation }) {
           </KeyboardAvoidingView>
         </Modal>
 
-        <Modal visible={expenseBreakdownVisible} transparent={true} animationType="slide">
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalOverlay}>
+        <Modal visible={expenseBreakdownVisible} transparent={true} animationType="fade" statusBarTranslucent={true}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
             <View style={styles.modalContent}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Expense Breakdown</Text>
@@ -792,7 +813,7 @@ export default function ShiftEndScreen({ navigation }) {
 
 const styles = StyleSheet.create({
   safeArea: { flex: 1, backgroundColor: '#F8F9FA' },
-  container: { padding: 15 },
+  container: { padding: 15, paddingBottom: 220 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   
   header: { 
@@ -880,21 +901,53 @@ const styles = StyleSheet.create({
     borderWidth: 1, 
     borderColor: '#D1D5DB', 
     borderRadius: 12, 
-    backgroundColor: '#F9FAFB',
+    backgroundColor: '#FFFFFF',
     overflow: 'hidden'
   },
   picker: {
     height: 50,
     color: '#0F172A',
+    backgroundColor: '#FFFFFF',
   },
   
   breakdownGrid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' },
   breakdownInputWrapper: { width: '48%', marginBottom: 10 },
   breakdownInputLabel: { fontSize: 13, fontWeight: 'bold', color: '#444', marginBottom: 2 },
+  breakdownTextInput: {
+    flex: 1,
+    height: 38,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: '#CBD5E1',
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    fontSize: 15,
+    fontWeight: 'bold',
+    color: '#0F172A',
+    textAlign: 'center'
+  },
   breakdownSectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#003C8F', marginTop: 10, marginBottom: 10, borderBottomWidth: 1, borderBottomColor: '#eee', paddingBottom: 5 },
   
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: '90%' },
+  modalOverlay: { 
+    flex: 1, 
+    backgroundColor: 'rgba(0,0,0,0.6)', 
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 16
+  },
+  modalContent: { 
+    backgroundColor: '#fff', 
+    borderRadius: 20, 
+    padding: 20, 
+    width: '100%',
+    maxWidth: 500,
+    maxHeight: '88%',
+    elevation: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 10
+  },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 15 },
   modalTitle: { fontSize: 20, fontWeight: 'bold', color: '#111827' },
   modalAmountBanner: { flexDirection: 'row', justifyContent: 'space-between', backgroundColor: '#E0F2FE', padding: 10, borderRadius: 8, marginBottom: 15 },

@@ -1,65 +1,155 @@
 rules_version = '2';
 
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// 1. users:
+//    - role: string ('salesman', 'owner', 'admin')
+//    - name: string
+//    - phone: string
+//    - active: bool
+//    - uid: string
+//    - createdAt: timestamp
+//
+// 2. Daily Operations Collections (Public Read/Write for Staff Operations):
+//    - sales_reports: daily shift/machine sales and meter readings
+//    - nozzles: nozzle master data and current meter readings
+//    - machines: dispensing machines configuration
+//    - tanks: fuel storage tanks and stock levels
+//    - tank_logs: fuel delivery, dips, and density logs
+//    - udhari_records: customer credit and repayment records
+//    - edit_requests: shift/entry edit approval requests
+//    - staff_salary_advances: salesman salary advances & deductions
+//    - sample_labels: fuel quality test sample logs
+//    - shifts: active and completed shifts
+//    - daily_pump_photos: daily pump inspection and verification photos
+//    - admin_expenses: pump maintenance, office expenses, generator fuel, supplies, etc.
+//    - digital_payment_modes: master payment channels (Paytm, PhonePe, Google Pay, etc.)
+//
+// 3. Admin Protected Collections (Requires Authenticated Admin):
+//    - bank_deposits: cash collection deposits to bank accounts
+//    - settings: system and petrol pump configurations
+//    - monthly_commission_rates: fuel margin/commission rates
+//
+// ===============================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Allow read/write for petrol pump daily staff operations without requiring admin login:
-    // Daily entry, meter readings, stock, udhari, salary advances, sample labels
+    // Helper function: verifies that the request comes from an authenticated admin
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // -------------------------------------------------------------
+    // 1. Users Collection
+    // - Public read allowed so Staff App (DailyEntry, Reports, History,
+    //   ShiftStart/End) can reliably populate staff dropdowns, maps, and
+    //   PDF report headers without authentication.
+    // - Write (create, update, delete) strictly restricted to logged-in admin.
+    // -------------------------------------------------------------
+    match /users/{document=**} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // -------------------------------------------------------------
+    // 2. Daily Operations (Public read and write for Staff App)
+    // - Used by DailyEntry, Reports, AddStock, History, SampleLabel
+    // -------------------------------------------------------------
+
+    // Sales reports: shift reports, daily entries, meter logs
     match /sales_reports/{document=**} {
       allow read, write: if true;
     }
 
+    // Nozzles: meter readings, nozzle status
     match /nozzles/{document=**} {
       allow read, write: if true;
     }
 
+    // Machines: dispensing units configuration
     match /machines/{document=**} {
       allow read, write: if true;
     }
 
+    // Tanks: petrol/diesel stock levels
     match /tanks/{document=**} {
       allow read, write: if true;
     }
 
+    // Tank logs: decanting, density, dip measurements, additions reports
     match /tank_logs/{document=**} {
       allow read, write: if true;
     }
 
+    // Udhari records: credit customer transactions & repayments
     match /udhari_records/{document=**} {
       allow read, write: if true;
     }
 
+    // Edit requests: supervisor edit approvals & OTP requests
     match /edit_requests/{document=**} {
       allow read, write: if true;
     }
 
+    // Staff salary advances: advance cash requests and deductions
     match /staff_salary_advances/{document=**} {
       allow read, write: if true;
     }
 
+    // Sample labels: periodic fuel density test labels
     match /sample_labels/{document=**} {
       allow read, write: if true;
     }
 
+    // Shifts: salesman shift start and end logs
     match /shifts/{document=**} {
       allow read, write: if true;
     }
 
-    // Allow anyone to read staff/user list for dropdowns; only logged-in admin can write/modify users
-    match /users/{document=**} {
-      allow read: if true;
-      allow write: if request.auth != null;
+    // Daily pump photos: daily pump inspection and verification photos
+    match /daily_pump_photos/{document=**} {
+      allow read, write: if true;
     }
 
-    // Protected Admin-only collections (bank deposits, settings, audit)
+    // Admin expenses: pump maintenance, office expenses, generator fuel, supplies, etc.
+    match /admin_expenses/{document=**} {
+      allow read, write: if true;
+    }
+
+    // Digital payment modes: master payment channels (Paytm, PhonePe, Google Pay, etc.)
+    match /digital_payment_modes/{document=**} {
+      allow read, write: if true;
+    }
+
+    // -------------------------------------------------------------
+    // 3. Admin-Only Collections (Requires request.auth != null)
+    // -------------------------------------------------------------
+
+    // Bank deposits: banking cash logs
     match /bank_deposits/{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAuthenticated();
     }
 
-    // Fallback: require admin login for any other collections
+    // Settings: pump & system preferences
+    match /settings/{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // Monthly commission rates: profit and margin calculators
+    match /monthly_commission_rates/{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+
+    // -------------------------------------------------------------
+    // 4. Default Fallback
+    // - Denies unauthenticated access to any other collections
+    // - Requires authenticated admin login
+    // -------------------------------------------------------------
     match /{document=**} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isAuthenticated();
     }
   }
 }
-

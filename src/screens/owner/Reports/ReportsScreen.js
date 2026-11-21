@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Platform, ActivityIndicator, Alert } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Platform, ActivityIndicator, Alert, Image, ScrollView } from 'react-native';
 import { collection, query, where, orderBy, getDocs, limit, startAfter } from 'firebase/firestore';
 import { db } from '../../../services/firebase';
 import DateTimePicker from '@react-native-community/datetimepicker';
@@ -8,6 +8,7 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
 import { generateAndSharePdf } from '../../../utils/generatePdfReceipt';
+import ImageViewerModal from '../../../components/ImageViewerModal';
 
 export default function ReportsScreen() {
   const [activeTab, setActiveTab] = useState('sales'); // 'sales' or 'additions'
@@ -23,7 +24,16 @@ export default function ReportsScreen() {
   const [additionsData, setAdditionsData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [salesmenMap, setSalesmenMap] = useState({});
+  const [salesmenStaffTypeMap, setSalesmenStaffTypeMap] = useState({});
   const [expandedId, setExpandedId] = useState(null);
+
+  // Fullscreen Interactive Image Viewer State
+  const [imageViewerData, setImageViewerData] = useState({
+    visible: false,
+    images: [],
+    initialIndex: 0,
+    title: 'Fuel Delivery Photos'
+  });
   
   // Pagination State for Additions only
   const [lastVisible, setLastVisible] = useState(null);
@@ -183,10 +193,17 @@ export default function ReportsScreen() {
         const q = query(collection(db, 'users'), where('role', '==', 'salesman'));
         const snap = await getDocs(q);
         const map = {};
+        const typeMap = {};
         snap.forEach(doc => {
-          map[doc.id] = doc.data().name;
+          const d = doc.data();
+          map[doc.id] = d.name;
+          typeMap[doc.id] = d.staffType || 'salesman';
+          if (d.name) {
+            typeMap[d.name.trim().toLowerCase()] = d.staffType || 'salesman';
+          }
         });
         setSalesmenMap(map);
+        setSalesmenStaffTypeMap(typeMap);
       } catch (err) {
         console.error("Error fetching salesmen map:", err);
       }
@@ -216,7 +233,17 @@ export default function ReportsScreen() {
       totalExpectedAmount: item.expectedTotalAmount || ((Number(item.petrolExpectedAmount || 0)) + (Number(item.dieselExpectedAmount || 0))),
       cashAmt: item.cashAmount || 0,
       digitalAmt: item.onlineAmount || 0,
-      digitalEntries: item.digitalPaymentsBreakdown || [],
+      digitalEntries: (item.digitalPaymentsBreakdown && item.digitalPaymentsBreakdown.length > 0)
+        ? item.digitalPaymentsBreakdown
+        : [
+            ...(item.paytmAmount ? [{ id: 'paytm', name: 'Paytm (पेटीएम)', amount: item.paytmAmount }] : []),
+            ...(item.phonePeAmount ? [{ id: 'phonepe', name: 'PhonePe (फोनपे)', amount: item.phonePeAmount }] : []),
+            ...(item.bobAmount ? [{ id: 'bob', name: 'BOB Bank (बैंक ऑफ बड़ौदा)', amount: item.bobAmount }] : []),
+            ...(((Number(item.atmAmount || 0)) + (Number(item.debitCardAmount || 0)) + (Number(item.creditCardAmount || 0))) > 0
+              ? [{ id: 'atm', name: 'ATM / POS स्वाइप', amount: (Number(item.atmAmount || 0)) + (Number(item.debitCardAmount || 0)) + (Number(item.creditCardAmount || 0)) }]
+              : []),
+            ...(item.bharatPeAmount ? [{ id: 'bharatpe', name: 'BharatPe UPI', amount: item.bharatPeAmount }] : [])
+          ],
       udhariAmt: item.udhariAmount || 0,
       udhariBreakdown: item.udhariBreakdown || [],
       expenseAmt: item.expenses || 0,
@@ -287,9 +314,44 @@ export default function ReportsScreen() {
       acc.collectedTotal += Number(curr.totalPayment || 0);
 
       acc.cash += Number(curr.cashAmount || 0);
-      acc.phonePe += Number(curr.phonePeAmount || 0);
-      acc.paytm += Number(curr.paytmAmount || 0);
-      acc.bharatPe += Number(curr.bharatPeAmount || 0);
+
+      // Extract digital channels reliably
+      let paytm = Number(curr.paytmAmount || 0);
+      let phonePe = Number(curr.phonePeAmount || 0);
+      let bharatPe = Number(curr.bharatPeAmount || 0);
+      let atm = (Number(curr.atmAmount || 0)) + (Number(curr.debitCardAmount || 0)) + (Number(curr.creditCardAmount || 0));
+      let bob = Number(curr.bobAmount || 0);
+
+      const dList = Array.isArray(curr.digitalPaymentsBreakdown) && curr.digitalPaymentsBreakdown.length > 0
+        ? curr.digitalPaymentsBreakdown
+        : (Array.isArray(curr.digitalEntries) ? curr.digitalEntries : []);
+
+      dList.forEach(d => {
+        const amt = parseFloat(d.amount) || 0;
+        const id = (d.id || d.modeId || '').toLowerCase();
+        const name = (d.name || '').toLowerCase();
+        if (amt > 0) {
+          if (id.includes('bob') || name.includes('bob') || name.includes('baroda')) {
+            bob = Math.max(bob, amt);
+          } else if (id.includes('paytm') || name.includes('paytm')) {
+            paytm = Math.max(paytm, amt);
+          } else if (id.includes('phone') || name.includes('phone')) {
+            phonePe = Math.max(phonePe, amt);
+          } else if (id.includes('atm') || id.includes('pos') || name.includes('atm') || name.includes('pos') || name.includes('card')) {
+            atm = Math.max(atm, amt);
+          } else if (id.includes('bharat') || name.includes('bharat')) {
+            bharatPe = Math.max(bharatPe, amt);
+          }
+        }
+      });
+
+      acc.phonePe += phonePe;
+      acc.paytm += paytm;
+      acc.bharatPe += bharatPe;
+      acc.atm += atm;
+      acc.bob += bob;
+      acc.totalMobil += Number(curr.totalMobilAmount || 0);
+      acc.totalMobilQty += Number(curr.totalMobilQty || (curr.mobilEntries?.length || 0));
       acc.udhari += Number(curr.udhariAmount || 0);
       acc.expenses += Number(curr.expenses || 0);
       
@@ -300,7 +362,7 @@ export default function ReportsScreen() {
     }, { 
       totalGrossSold: 0, petrolSold: 0, dieselSold: 0, testingFuel: 0,
       expectedTotal: 0, collectedTotal: 0, 
-      cash: 0, phonePe: 0, paytm: 0, bharatPe: 0, udhari: 0, expenses: 0, 
+      cash: 0, phonePe: 0, paytm: 0, bharatPe: 0, atm: 0, bob: 0, totalMobil: 0, totalMobilQty: 0, udhari: 0, expenses: 0, 
       shortageOrExcess: 0 
     });
   }, [salesData]);
@@ -366,11 +428,13 @@ export default function ReportsScreen() {
           const amt = Number(e.amount || 0);
           if (amt > 0 && isSalaryAdvance(e)) {
             const recipientName = e.salesmanName || (e.salesmanId ? salesmenMap[e.salesmanId] : null) || shiftStaff;
+            const staffType = e.salesmanId ? salesmenStaffTypeMap[e.salesmanId] : (recipientName ? salesmenStaffTypeMap[recipientName.trim().toLowerCase()] : 'salesman');
             const key = `${item.id}_${e.id || idx}_${amt}`;
             seenKeys.add(key);
             list.push({
               id: key,
               recipientName,
+              staffType: staffType || 'salesman',
               amount: amt,
               notes: e.notes || e.reason || 'Salary Advance',
               shiftStaff,
@@ -390,9 +454,11 @@ export default function ReportsScreen() {
       const alreadyCaptured = adv.reportId && list.some(x => x.reportId === adv.reportId && Math.abs(x.amount - amt) < 0.01);
       if (!alreadyCaptured) {
         const recipientName = adv.salesmanName || (adv.salesmanId ? salesmenMap[adv.salesmanId] : null) || 'Staff';
+        const staffType = adv.salesmanId ? salesmenStaffTypeMap[adv.salesmanId] : (recipientName ? salesmenStaffTypeMap[recipientName.trim().toLowerCase()] : 'salesman');
         list.push({
           id: adv.id,
           recipientName,
+          staffType: staffType || 'salesman',
           amount: amt,
           notes: adv.notes || adv.reason || 'Salary Advance',
           shiftStaff: adv.salesmanName || 'Direct Advance',
@@ -404,7 +470,7 @@ export default function ReportsScreen() {
     });
 
     return list;
-  }, [salesData, salaryAdvancesData, salesmenMap]);
+  }, [salesData, salaryAdvancesData, salesmenMap, salesmenStaffTypeMap]);
 
   // Extract all itemized General Operating Expense entries across all shifts
   const allExpenseEntries = useMemo(() => {
@@ -544,10 +610,6 @@ export default function ReportsScreen() {
               <div class="card-label">TOTAL DIESEL (HSD)</div>
               <div class="card-val" style="color: #003C8F;">${additionsSummary.dieselLiters.toLocaleString('en-IN')} L</div>
             </div>
-            <div class="card" style="border-left: 4px solid #0284C7;">
-              <div class="card-label">TOTAL FUEL DELIVERED</div>
-              <div class="card-val" style="color: #0284C7;">${(additionsSummary.petrolLiters + additionsSummary.dieselLiters).toLocaleString('en-IN')} L</div>
-            </div>
             <div class="card" style="border-left: 4px solid #10B981;">
               <div class="card-label">TANKER DELIVERIES</div>
               <div class="card-val" style="color: #10B981;">${additionsSummary.tankerCount}</div>
@@ -615,20 +677,22 @@ export default function ReportsScreen() {
 
   const generatePDF = async () => {
     try {
-      if (salesData.length === 0) {
-        Alert.alert("Info", "No sales data available to generate report.");
+      if (salesData.length === 0 && salaryAdvancesData.length === 0) {
+        Alert.alert("Info", "No sales or salary advance data available to generate report for this date.");
         return;
       }
       
       let shiftRows = '';
+      let shiftAuditBlocksHtml = '';
       let udhariRows = '';
       let expenseRows = '';
       let salaryAdvanceRows = '';
 
       allSalaryAdvanceEntries.forEach(adv => {
+        const roleLabel = adv.staffType === 'watchman' ? ' [चौकीदार]' : (adv.staffType === 'sweeper' ? ' [सफाईकर्मी]' : ' [सेल्समैन]');
         salaryAdvanceRows += `
           <tr>
-            <td><strong>${adv.recipientName}</strong></td>
+            <td><strong>${adv.recipientName}</strong> <span style="font-size: 11px; color: #64748B;">${roleLabel}</span></td>
             <td>${adv.shiftStaff} (${adv.machineName})</td>
             <td>${adv.notes || 'Salary Advance'}</td>
             <td style="font-weight: bold; color: #B45309;">₹${Number(adv.amount).toFixed(2)}</td>
@@ -637,29 +701,251 @@ export default function ReportsScreen() {
       });
 
       salesData.forEach((item, index) => {
-        const salesmanName = salesmenMap[item.salesmanId] || item.salesmanName || item.salesmanId;
-        const pSold = Number(item.petrolQuantitySold ?? (item.fuelType === 'Petrol' ? item.totalQuantitySold : 0) ?? 0);
-        const dSold = Number(item.dieselQuantitySold ?? (item.fuelType === 'Diesel' ? item.totalQuantitySold : 0) ?? 0);
-        const pTesting = Number(item.petrolTesting ?? (item.fuelType === 'Petrol' ? item.testingQuantity : 0) ?? 0);
-        const dTesting = Number(item.dieselTesting ?? (item.fuelType === 'Diesel' ? item.testingQuantity : 0) ?? 0);
-        const testingQty = (pTesting + dTesting || Number(item.testingQuantity || 0)).toFixed(2);
-        const shortage = Number(item.shortageOrExcess || 0);
-        const shortageStr = shortage < 0 
-          ? `<span style="color: #DC2626; font-weight: bold;">₹${Math.abs(shortage).toFixed(2)} (S)</span>` 
-          : `<span style="color: #059669; font-weight: bold;">₹${Math.abs(shortage).toFixed(2)} (E)</span>`;
+        const salesmanName = salesmenMap[item.salesmanId] || item.salesmanName || item.salesmanId || 'Staff';
+        const machineName = item.machineName || item.machineId || 'Machine';
 
+        const shiftTime = item.timestamp?.toDate ? item.timestamp.toDate() : (item.timestamp ? new Date(item.timestamp) : null);
+        const shiftTimeStr = shiftTime ? shiftTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : 'Day Shift';
+
+        // Petrol data
+        const pNozzle = item.petrolEntry?.nozzleId || item.petrolNozzleId || (item.fuelType === 'Petrol' ? item.nozzleId : 'N1');
+        const pOpen = item.petrolOpeningMeter || item.petrolEntry?.openingMeterReading || item.openingMeterReading || '0.0000';
+        const pClose = item.petrolClosingMeter || item.petrolEntry?.closingMeterReading || item.closingMeterReading || '0.0000';
+        const pTesting = Number(item.petrolTesting ?? item.petrolEntry?.testingQuantity ?? (item.fuelType === 'Petrol' ? item.testingQuantity : 0) ?? 0);
+        const pOfficial = Number(item.petrolOfficialTesting ?? item.petrolEntry?.officialTesting ?? 0);
+        const pSold = Number(item.petrolQuantitySold ?? item.petrolEntry?.totalQuantitySold ?? (item.fuelType === 'Petrol' ? item.totalQuantitySold : 0) ?? 0);
+        const pRate = Number(item.petrolRate || item.petrolEntry?.fuelRate || 0);
+        const pExp = Number(item.petrolExpectedAmount || item.petrolEntry?.expectedAmount || (pSold * pRate));
+        const pGross = (Number(pClose) - Number(pOpen)) > 0 ? (Number(pClose) - Number(pOpen)) : (pSold + pTesting);
+
+        // Diesel data
+        const dNozzle = item.dieselEntry?.nozzleId || item.dieselNozzleId || (item.fuelType === 'Diesel' ? item.nozzleId : 'N2');
+        const dOpen = item.dieselOpeningMeter || item.dieselEntry?.openingMeterReading || '0.0000';
+        const dClose = item.dieselClosingMeter || item.dieselEntry?.closingMeterReading || '0.0000';
+        const dTesting = Number(item.dieselTesting ?? item.dieselEntry?.testingQuantity ?? (item.fuelType === 'Diesel' ? item.testingQuantity : 0) ?? 0);
+        const dOfficial = Number(item.dieselOfficialTesting ?? item.dieselEntry?.officialTesting ?? 0);
+        const dSold = Number(item.dieselQuantitySold ?? item.dieselEntry?.totalQuantitySold ?? (item.fuelType === 'Diesel' ? item.totalQuantitySold : 0) ?? 0);
+        const dRate = Number(item.dieselRate || item.dieselEntry?.fuelRate || 0);
+        const dExp = Number(item.dieselExpectedAmount || item.dieselEntry?.expectedAmount || (dSold * dRate));
+        const dGross = (Number(dClose) - Number(dOpen)) > 0 ? (Number(dClose) - Number(dOpen)) : (dSold + dTesting);
+
+        // Strict Shift 1 vs Shift 2 rule: Testing > 0 is Shift 1, Testing = 0 is Shift 2
+        const hasTesting = (pTesting > 0 || dTesting > 0);
+        const shiftNum = hasTesting ? 1 : 2;
+        const shiftLabel = hasTesting ? 'Shift 1 (Testing Add)' : 'Shift 2 (No Testing)';
+
+        // Mobil data
+        const mobilAmt = Number(item.totalMobilAmount || 0);
+        const mobilQty = Number(item.totalMobilQty || (item.mobilEntries?.length || 0));
+
+        let mobilRowHtml = '';
+        if (mobilAmt > 0) {
+          mobilRowHtml = `
+            <tr>
+              <td style="font-weight: 700; color: #7C3AED;">मोबिल (Mobil Oil)</td>
+              <td>—</td>
+              <td style="text-align: right; color: #64748B;">—</td>
+              <td style="text-align: right; color: #64748B;">—</td>
+              <td style="text-align: right;">${mobilQty} Pcs</td>
+              <td style="text-align: right; color: #64748B;">0.00</td>
+              <td style="text-align: right; font-weight: 700; color: #7C3AED;">${mobilQty} Pcs</td>
+              <td style="text-align: right;">—</td>
+              <td style="text-align: right; font-weight: 700; color: #7C3AED;">₹${mobilAmt.toFixed(2)}</td>
+            </tr>
+          `;
+        }
+
+        const expTotal = Number(item.expectedTotalAmount || (pExp + dExp + mobilAmt));
+        const colTotal = Number(item.totalPayment || 0);
+        const shortage = Number(item.shortageOrExcess || (colTotal - expTotal));
+        const shortageStr = shortage < -0.01 
+          ? `<span style="color: #DC2626; font-weight: 800;">-₹${Math.abs(shortage).toFixed(2)} (Shortage)</span>` 
+          : shortage > 0.01
+          ? `<span style="color: #16A34A; font-weight: 800;">+₹${shortage.toFixed(2)} (Excess)</span>`
+          : `<span style="color: #059669; font-weight: 700;">₹0.00 (100% Balanced)</span>`;
+
+        // Collections for this shift
+        const cashNotes = Number(item.cashNotesAmount || 0);
+        const coins = Number(item.coinsAmount || 0);
+        const cashAmt = Number(item.cashAmount || (cashNotes + coins) || 0);
+
+        let cashNoteSub = '';
+        if (item.cashBreakdown && typeof item.cashBreakdown === 'object') {
+          const cb = item.cashBreakdown;
+          const parts = [];
+          if (cb.notes500 > 0) parts.push(`₹500×${cb.notes500}`);
+          if (cb.notes200 > 0) parts.push(`₹200×${cb.notes200}`);
+          if (cb.notes100 > 0) parts.push(`₹100×${cb.notes100}`);
+          if (cb.notes50 > 0) parts.push(`₹50×${cb.notes50}`);
+          if (cb.notes20 > 0) parts.push(`₹20×${cb.notes20}`);
+          if (cb.notes10 > 0) parts.push(`₹10×${cb.notes10}`);
+          if (coins > 0) parts.push(`चिल्लर: ₹${coins}`);
+          if (parts.length > 0) cashNoteSub = parts.join(', ');
+        }
+        if (!cashNoteSub && (cashNotes > 0 || coins > 0)) {
+          cashNoteSub = `Notes: ₹${cashNotes || (cashAmt - coins)} • Coins: ₹${coins}`;
+        }
+
+        // Digital breakdown for this shift
+        let pPhone = Number(item.phonePeAmount || 0);
+        let pPaytm = Number(item.paytmAmount || 0);
+        let pBob = Number(item.bobAmount || 0);
+        let pAtm = (Number(item.atmAmount || 0)) + (Number(item.debitCardAmount || 0)) + (Number(item.creditCardAmount || 0));
+        let pBharat = Number(item.bharatPeAmount || 0);
+
+        const dList = Array.isArray(item.digitalPaymentsBreakdown) ? item.digitalPaymentsBreakdown : (Array.isArray(item.digitalEntries) ? item.digitalEntries : []);
+        dList.forEach(d => {
+          const amt = parseFloat(d.amount) || 0;
+          const id = (d.id || d.modeId || '').toLowerCase();
+          const name = (d.name || '').toLowerCase();
+          if (amt > 0) {
+            if (id.includes('bob') || name.includes('bob') || name.includes('baroda')) pBob = Math.max(pBob, amt);
+            else if (id.includes('paytm') || name.includes('paytm')) pPaytm = Math.max(pPaytm, amt);
+            else if (id.includes('phone') || name.includes('phone')) pPhone = Math.max(pPhone, amt);
+            else if (id.includes('atm') || id.includes('pos') || name.includes('atm') || name.includes('pos') || name.includes('card')) pAtm = Math.max(pAtm, amt);
+            else if (id.includes('bharat') || name.includes('bharat')) pBharat = Math.max(pBharat, amt);
+          }
+        });
+
+        const digitalParts = [];
+        if (pPhone > 0) digitalParts.push(`PhonePe: ₹${pPhone.toFixed(0)}`);
+        if (pPaytm > 0) digitalParts.push(`Paytm: ₹${pPaytm.toFixed(0)}`);
+        if (pBob > 0) digitalParts.push(`BOB Bank: ₹${pBob.toFixed(0)}`);
+        if (pAtm > 0) digitalParts.push(`ATM/POS: ₹${pAtm.toFixed(0)}`);
+        if (pBharat > 0) digitalParts.push(`BharatPe: ₹${pBharat.toFixed(0)}`);
+        const digitalSub = digitalParts.join(' • ');
+        const shiftDigitalTotal = Number(item.onlineAmount) > 0 ? Number(item.onlineAmount) : (pPhone + pPaytm + pBob + pAtm + pBharat);
+
+        // Udhari for this shift
+        const udhariAmt = Number(item.udhariAmount || 0);
+        let udhariSub = '';
+        if (item.udhariBreakdown && Array.isArray(item.udhariBreakdown) && item.udhariBreakdown.length > 0) {
+          const uNames = item.udhariBreakdown.filter(u => u.name && Number(u.amount) > 0).map(u => `${u.name} (₹${Number(u.amount).toFixed(0)})`);
+          if (uNames.length > 0) udhariSub = uNames.join(', ');
+        }
+
+        // Expenses for this shift
+        const expenseAmt = Number(item.expenses || 0);
+        let expenseSub = '';
+        if (item.expenseBreakdown && Array.isArray(item.expenseBreakdown) && item.expenseBreakdown.length > 0) {
+          const eNames = item.expenseBreakdown.filter(e => Number(e.amount) > 0).map(e => `${e.reason || (e.type === 'salary' ? 'वेतन' : 'खर्चा')} (₹${Number(e.amount).toFixed(0)})`);
+          if (eNames.length > 0) expenseSub = eNames.join(', ');
+        }
+
+        // Add summary row for shift summary table
         shiftRows += `
           <tr>
-            <td>${index + 1}</td>
-            <td>${salesmanName}</td>
-            <td>${item.machineName || item.machineId || 'Machine'} (${item.petrolNozzleId || 'N1'}+${item.dieselNozzleId || 'N2'})</td>
-            <td>${pSold.toFixed(2)}</td>
-            <td>${dSold.toFixed(2)}</td>
-            <td>${testingQty}</td>
-            <td>₹${Number(item.expectedTotalAmount || 0).toFixed(2)}</td>
-            <td>₹${Number(item.totalPayment || 0).toFixed(2)}</td>
-            <td>${shortageStr}</td>
+            <td style="text-align: center; font-weight: bold;">${index + 1}</td>
+            <td><strong>${salesmanName}</strong> <span style="font-size: 10px; color: ${hasTesting ? '#B45309' : '#003C8F'}; font-weight: 700;">(Shift ${shiftNum})</span></td>
+            <td>${machineName} (${pNozzle}+${dNozzle})</td>
+            <td style="text-align: right; color: #EA580C; font-weight: bold;">${pSold.toFixed(2)}</td>
+            <td style="text-align: right; color: #003C8F; font-weight: bold;">${dSold.toFixed(2)}</td>
+            <td style="text-align: right; color: #92400E;">${(pTesting + dTesting).toFixed(2)}</td>
+            <td style="text-align: right;">₹${expTotal.toFixed(2)}</td>
+            <td style="text-align: right; font-weight: bold; color: #15803D;">₹${colTotal.toFixed(2)}</td>
+            <td style="text-align: right;">${shortageStr}</td>
           </tr>
+        `;
+
+        // Build Comprehensive Individual Shift Card
+        shiftAuditBlocksHtml += `
+          <div class="shift-audit-card">
+            <div class="shift-card-header">
+              <div>
+                <span style="font-size: 12px; font-weight: 800; color: #003C8F;">Shift #${shiftNum} (${hasTesting ? 'जांच तेल / Shift 1' : 'नो-टेस्टिंग / Shift 2'}): ${salesmanName}</span>
+                <span style="font-size: 10.5px; color: #475569; margin-left: 8px;">• ${machineName} (${pNozzle} + ${dNozzle})</span>
+              </div>
+              <div style="font-size: 10.5px; color: #64748B; font-weight: 600;">
+                🕒 Logged: ${shiftTimeStr}
+              </div>
+            </div>
+
+            <table class="shift-meter-table">
+              <thead>
+                <tr>
+                  <th>Fuel</th>
+                  <th>Nozzle</th>
+                  <th style="text-align: right;">Start (Opening)</th>
+                  <th style="text-align: right;">Close (Closing)</th>
+                  <th style="text-align: right;">Gross Meter (L)</th>
+                  <th style="text-align: right;">Testing (L)</th>
+                  <th style="text-align: right;">Net Sold (L)</th>
+                  <th style="text-align: right;">Rate (₹/L)</th>
+                  <th style="text-align: right;">Expected (₹)</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="font-weight: 700; color: #EA580C;">Petrol (MS)</td>
+                  <td>${pNozzle}</td>
+                  <td style="text-align: right; font-family: monospace; font-weight: 600;">${pOpen}</td>
+                  <td style="text-align: right; font-family: monospace; font-weight: 600;">${pClose}</td>
+                  <td style="text-align: right;">${pGross.toFixed(2)}</td>
+                  <td style="text-align: right; color: #92400E;">
+                    ${pTesting > 0 ? `-${pTesting.toFixed(2)}${pOfficial > 0 ? `<br/><span style="font-size: 8.5px; color: #166534; font-weight: 700;">(Official: ${pOfficial}L)</span>` : ''}` : '0.00'}
+                  </td>
+                  <td style="text-align: right; font-weight: 700; color: #EA580C;">${pSold.toFixed(2)} L</td>
+                  <td style="text-align: right;">₹${pRate.toFixed(2)}</td>
+                  <td style="text-align: right; font-weight: 700;">₹${pExp.toFixed(2)}</td>
+                </tr>
+                <tr>
+                  <td style="font-weight: 700; color: #003C8F;">Diesel (HSD)</td>
+                  <td>${dNozzle}</td>
+                  <td style="text-align: right; font-family: monospace; font-weight: 600;">${dOpen}</td>
+                  <td style="text-align: right; font-family: monospace; font-weight: 600;">${dClose}</td>
+                  <td style="text-align: right;">${dGross.toFixed(2)}</td>
+                  <td style="text-align: right; color: #92400E;">
+                    ${dTesting > 0 ? `-${dTesting.toFixed(2)}${dOfficial > 0 ? `<br/><span style="font-size: 8.5px; color: #166534; font-weight: 700;">(Official: ${dOfficial}L)</span>` : ''}` : '0.00'}
+                  </td>
+                  <td style="text-align: right; font-weight: 700; color: #003C8F;">${dSold.toFixed(2)} L</td>
+                  <td style="text-align: right;">₹${dRate.toFixed(2)}</td>
+                  <td style="text-align: right; font-weight: 700;">₹${dExp.toFixed(2)}</td>
+                </tr>
+                ${mobilRowHtml}
+                <tr class="shift-meter-total-row">
+                  <td colspan="6" style="font-weight: 800; color: #0F172A;">TOTAL METER SALES FOR THIS SHIFT</td>
+                  <td style="text-align: right; font-weight: 800; color: #0F172A; font-size: 11px;">MS: ${pSold.toFixed(2)} L • HSD: ${dSold.toFixed(2)} L</td>
+                  <td></td>
+                  <td style="text-align: right; font-weight: 800; color: #003C8F;">₹${expTotal.toFixed(2)}</td>
+                </tr>
+              </tbody>
+            </table>
+
+            <div class="shift-settlement-box">
+              <div class="shift-settlement-title">💰 Shift Collection & Payment Realization Breakdown</div>
+              <div class="shift-settlement-grid">
+                <div class="shift-settle-item">
+                  <span class="label">💵 Cash Collected</span>
+                  <span class="val" style="color: #15803D;">₹${cashAmt.toFixed(2)}</span>
+                  ${cashNoteSub ? `<div class="sub">${cashNoteSub}</div>` : ''}
+                </div>
+
+                <div class="shift-settle-item">
+                  <span class="label">📱 Digital / Online</span>
+                  <span class="val" style="color: #0284C7;">₹${shiftDigitalTotal.toFixed(2)}</span>
+                  ${digitalSub ? `<div class="sub">${digitalSub}</div>` : ''}
+                </div>
+
+                <div class="shift-settle-item">
+                  <span class="label">📒 Customer Udhari</span>
+                  <span class="val" style="color: #9333EA;">₹${udhariAmt.toFixed(2)}</span>
+                  ${udhariSub ? `<div class="sub">${udhariSub}</div>` : ''}
+                </div>
+
+                <div class="shift-settle-item">
+                  <span class="label">🧾 Expenses / Advances</span>
+                  <span class="val" style="color: #DC2626;">₹${expenseAmt.toFixed(2)}</span>
+                  ${expenseSub ? `<div class="sub">${expenseSub}</div>` : ''}
+                </div>
+              </div>
+
+              <div class="shift-reconcile-bar">
+                <span><strong>Shift Expected Revenue:</strong> ₹${expTotal.toFixed(2)}</span>
+                <span><strong>Shift Total Collected:</strong> ₹${colTotal.toFixed(2)}</span>
+                <span><strong>Shift Net Variance:</strong> ${shortageStr}</span>
+              </div>
+            </div>
+          </div>
         `;
 
         if (item.udhariBreakdown && item.udhariBreakdown.length > 0) {
@@ -734,9 +1020,6 @@ export default function ReportsScreen() {
               <td style="text-align: right; color: #92400E; font-weight: 600; padding: 9px 10px;">
                 ${testTotal > 0 ? `${testTotal.toFixed(2)} L` : '-'}
               </td>
-              <td style="text-align: right; font-weight: 800; color: #0F172A; font-size: 13px; padding: 9px 10px;">
-                ${(m.totalLiters || 0).toFixed(2)} L
-              </td>
               <td style="text-align: right; color: #334155; font-weight: 600; padding: 9px 10px;">
                 ₹${(m.expectedAmount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </td>
@@ -752,7 +1035,7 @@ export default function ReportsScreen() {
       } else {
         machineTableRows = `
           <tr>
-            <td colspan="8" style="text-align: center; color: #64748B; padding: 14px;">No dispenser data recorded for this date.</td>
+            <td colspan="7" style="text-align: center; color: #64748B; padding: 14px;">No dispenser data recorded for this date.</td>
           </tr>
         `;
       }
@@ -782,16 +1065,6 @@ export default function ReportsScreen() {
         minute: '2-digit',
         hour12: true
       });
-
-      const settleStatusStr = isDaySettled 
-        ? `<div class="settle-pill settled">
-             <span class="status-icon">✓</span>
-             <span><strong>BANK STATUS: SETTLED</strong> — All collections reconciled and deposited into bank account.</span>
-           </div>`
-        : `<div class="settle-pill pending">
-             <span class="status-icon">⏳</span>
-             <span><strong>BANK STATUS: PENDING</strong> — Cash and digital collections awaiting day-end deposit reconciliation.</span>
-           </div>`;
 
       const htmlContent = `
         <!DOCTYPE html>
@@ -876,29 +1149,104 @@ export default function ReportsScreen() {
                 margin-top: 4px;
               }
 
-              /* Settlement Pill */
-              .settle-pill {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 8px 14px;
+              /* Detailed Shift Audit Cards */
+              .shift-audit-card {
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
                 border-radius: 8px;
-                margin-bottom: 14px;
-                font-size: 11px;
+                margin-bottom: 12px;
+                overflow: hidden;
+                page-break-inside: avoid;
               }
-              .settle-pill.settled {
-                background-color: #ECFDF5;
-                border: 1px solid #A7F3D0;
-                color: #065F46;
+              .shift-card-header {
+                background-color: #F8FAFC;
+                border-bottom: 1px solid #E2E8F0;
+                padding: 7px 10px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
               }
-              .settle-pill.pending {
-                background-color: #FFFBEB;
-                border: 1px solid #FDE68A;
-                color: #92400E;
+              .shift-meter-table {
+                width: 100%;
+                border-collapse: collapse;
+                font-size: 10px;
               }
-              .status-icon {
-                font-size: 14px;
-                font-weight: bold;
+              .shift-meter-table th {
+                background-color: #003C8F;
+                color: #FFFFFF;
+                padding: 5px 6px;
+                font-weight: 700;
+                text-align: left;
+                font-size: 9.5px;
+                border-bottom: 1px solid #002766;
+              }
+              .shift-meter-table td {
+                padding: 5px 6px;
+                border-bottom: 1px solid #E2E8F0;
+                font-size: 10px;
+              }
+              .shift-meter-total-row td {
+                background-color: #F1F5F9;
+                border-top: 1.5px solid #CBD5E1;
+                font-weight: 800;
+              }
+              .shift-settlement-box {
+                background-color: #FAFBFD;
+                border-top: 1px dashed #CBD5E1;
+                padding: 8px 10px;
+              }
+              .shift-settlement-title {
+                font-size: 10px;
+                font-weight: 800;
+                color: #003C8F;
+                text-transform: uppercase;
+                margin-bottom: 6px;
+                letter-spacing: 0.3px;
+              }
+              .shift-settlement-grid {
+                display: flex;
+                gap: 6px;
+                flex-wrap: wrap;
+              }
+              .shift-settle-item {
+                flex: 1 1 calc(25% - 6px);
+                background-color: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 6px;
+                padding: 5px 7px;
+                min-width: 130px;
+              }
+              .shift-settle-item .label {
+                display: block;
+                font-size: 8.5px;
+                color: #64748B;
+                font-weight: 700;
+                text-transform: uppercase;
+              }
+              .shift-settle-item .val {
+                display: block;
+                font-size: 12px;
+                font-weight: 800;
+                color: #0F172A;
+                margin-top: 1px;
+              }
+              .shift-settle-item .sub {
+                font-size: 8.5px;
+                color: #475569;
+                margin-top: 2px;
+                line-height: 1.3;
+                word-break: break-word;
+              }
+              .shift-reconcile-bar {
+                margin-top: 6px;
+                background-color: #FFFFFF;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 5px 8px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 10px;
               }
 
               /* KPI Cards Grid */
@@ -1097,9 +1445,6 @@ export default function ReportsScreen() {
               </div>
             </div>
 
-            <!-- Settlement Status Banner -->
-            ${settleStatusStr}
-
             <!-- Executive KPI Summary Cards -->
             <div class="kpi-grid">
               <div class="kpi-card highlight-petrol">
@@ -1142,7 +1487,6 @@ export default function ReportsScreen() {
                     <th style="text-align: right;">Petrol (MS)</th>
                     <th style="text-align: right;">Diesel (HSD)</th>
                     <th style="text-align: right;">Testing (L)</th>
-                    <th style="text-align: right;">Total Net Sold</th>
                     <th style="text-align: right;">Expected (₹)</th>
                     <th style="text-align: right;">Collected (₹)</th>
                     <th style="text-align: right;">Variance (₹)</th>
@@ -1155,7 +1499,6 @@ export default function ReportsScreen() {
                     <td style="text-align: right; color: #EA580C;">${totalMachinePetrol.toFixed(2)} L</td>
                     <td style="text-align: right; color: #0284C7;">${totalMachineDiesel.toFixed(2)} L</td>
                     <td style="text-align: right; color: #92400E;">${totalMachineTesting.toFixed(2)} L</td>
-                    <td style="text-align: right; color: #0F172A; font-size: 13px;">${totalMachineVolume.toFixed(2)} L</td>
                     <td style="text-align: right;">₹${totalMachineExpected.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td style="text-align: right; color: #15803D;">₹${totalMachineCollected.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                     <td style="text-align: right;">${totalMachineVarianceBadge}</td>
@@ -1186,6 +1529,16 @@ export default function ReportsScreen() {
                   <div class="payment-pill-amount">₹${summary.paytm.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                   <div class="payment-pill-sub">Direct digital QR settlement</div>
                 </div>
+                <div class="payment-pill" style="border-left: 3px solid #EA580C;">
+                  <div class="payment-pill-title" style="color: #EA580C;">🏦 BOB Bank (बैंक ऑफ बड़ौदा)</div>
+                  <div class="payment-pill-amount">₹${summary.bob.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  <div class="payment-pill-sub">Bank of Baroda QR / Direct NetBanking</div>
+                </div>
+                <div class="payment-pill" style="border-left: 3px solid #003C8F;">
+                  <div class="payment-pill-title" style="color: #003C8F;">💳 ATM / POS स्वाइप</div>
+                  <div class="payment-pill-amount">₹${summary.atm.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  <div class="payment-pill-sub">Card Swipe Machine (POS Terminal)</div>
+                </div>
                 <div class="payment-pill">
                   <div class="payment-pill-title">📱 BharatPe UPI</div>
                   <div class="payment-pill-amount">₹${summary.bharatPe.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
@@ -1196,6 +1549,13 @@ export default function ReportsScreen() {
                   <div class="payment-pill-amount">₹${summary.udhari.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
                   <div class="payment-pill-sub">Signed credit ledger slips</div>
                 </div>
+                ${summary.totalMobil > 0 ? `
+                <div class="payment-pill" style="background-color: #FAF5FF; border-color: #DDD6FE;">
+                  <div class="payment-pill-title" style="color: #7C3AED;">🛢️ मोबिल बिक्री (Mobil Sales)</div>
+                  <div class="payment-pill-amount" style="color: #7C3AED;">₹${summary.totalMobil.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                  <div class="payment-pill-sub" style="color: #6D28D9;">${summary.totalMobilQty || 0} Pcs Lubricants / Oil Sold</div>
+                </div>
+                ` : ''}
                 <div class="payment-pill">
                   <div class="payment-pill-title">🧾 Operating Expenses</div>
                   <div class="payment-pill-amount" style="color: #DC2626;">₹${totalOperatingExpenseAmount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
@@ -1209,16 +1569,16 @@ export default function ReportsScreen() {
               </div>
             </div>
 
-            <!-- Section 3: Staff Shift Logs & Nozzle Meter Breakdown -->
+            <!-- Section 3: Staff Shift Logs & Detailed Nozzle Meter Breakdown -->
             <div class="section-card">
               <div class="section-header">
-                <h3 class="section-header-title">3. Individual Staff Shifts & Nozzle Meter Audits</h3>
+                <h3 class="section-header-title">3. Individual Staff Shifts & Summary Audit</h3>
                 <span class="section-badge">${salesData.length} Verified Shifts</span>
               </div>
               <table class="data-table">
                 <thead>
                   <tr>
-                    <th style="width: 25px;">#</th>
+                    <th style="width: 25px; text-align: center;">#</th>
                     <th>Salesman</th>
                     <th>Dispenser & Nozzles</th>
                     <th style="text-align: right;">Petrol (L)</th>
@@ -1233,6 +1593,19 @@ export default function ReportsScreen() {
                   ${shiftRows}
                 </tbody>
               </table>
+            </div>
+
+            <!-- Detailed Shift-by-Shift Meter & Collection Ledger (Start & Close Readings, Payments, Udhari, Expenses) -->
+            <div style="margin-top: 14px; margin-bottom: 8px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <h3 style="font-size: 12px; font-weight: 800; color: #003C8F; text-transform: uppercase; margin: 0;">
+                  Detailed Shift Audits (Start / Close Meter Readings & Realized Collections)
+                </h3>
+                <span class="section-badge" style="background-color: #EFF6FF; color: #1E40AF; border: 1px solid #BFDBFE;">
+                  ${salesData.length} Complete Shift Ledgers
+                </span>
+              </div>
+              ${shiftAuditBlocksHtml}
             </div>
 
             <!-- Section 4: Staff Salary & Advances Itemized (Conditional) -->
@@ -1363,7 +1736,7 @@ export default function ReportsScreen() {
   };
 
   const renderSummaryDashboard = () => {
-    if (salesData.length === 0) return null;
+    if (salesData.length === 0 && allSalaryAdvanceEntries.length === 0) return null;
     const isNetShortage = summary.shortageOrExcess < 0;
     
     return (
@@ -1506,13 +1879,13 @@ export default function ReportsScreen() {
               </Text>
             </View>
 
-            {/* Total Row */}
+            {/* Net Summary Row */}
             <View style={styles.tableTotalRow}>
-              <Text style={[styles.tableTotalText, { flex: 1.5 }]}>Total Fuel Volume</Text>
-              <Text style={[styles.tableTotalText, { flex: 1, textAlign: 'right' }]}>{summary.totalGrossSold.toFixed(2)}</Text>
-              <Text style={[styles.tableTotalSub, { flex: 1, textAlign: 'right' }]}>-{summary.testingFuel.toFixed(2)}</Text>
-              <Text style={[styles.tableTotalHighlight, { flex: 1.2, textAlign: 'right' }]}>
-                {summary.totalGrossSold.toFixed(2)} L
+              <Text style={[styles.tableTotalText, { flex: 1.5 }]}>Fuel Summary</Text>
+              <Text style={[styles.tableTotalText, { flex: 1, textAlign: 'right', color: '#EA580C', fontSize: 11 }]}>MS: {summary.petrolSold.toFixed(2)}L</Text>
+              <Text style={[styles.tableTotalSub, { flex: 1, textAlign: 'right', color: '#64748B', fontSize: 10 }]}>Test: {summary.testingFuel.toFixed(1)}L</Text>
+              <Text style={[styles.tableTotalHighlight, { flex: 1.2, textAlign: 'right', color: '#003C8F', fontSize: 11 }]}>
+                HSD: {summary.dieselSold.toFixed(2)}L
               </Text>
             </View>
           </View>
@@ -1531,7 +1904,7 @@ export default function ReportsScreen() {
                       <Text style={styles.machineCardTitle}>Machine {m.name}</Text>
                     </View>
                     <View style={styles.machineTotalBadge}>
-                      <Text style={styles.machineTotalBadgeText}>{m.totalLiters.toFixed(2)} L Total</Text>
+                      <Text style={styles.machineTotalBadgeText}>MS: {m.petrolSold.toFixed(1)}L • HSD: {m.dieselSold.toFixed(1)}L</Text>
                     </View>
                   </View>
 
@@ -1605,6 +1978,24 @@ export default function ReportsScreen() {
               </View>
               <Text style={styles.paymentCardAmount}>₹{summary.paytm.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</Text>
               <Text style={styles.paymentCardNote}>Digital direct credit</Text>
+            </View>
+
+            <View style={[styles.paymentCard, { borderLeftColor: '#EA580C', borderLeftWidth: 4 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Icon name="business" size={16} color="#EA580C" />
+                <Text style={styles.paymentCardLabel}>BOB Bank</Text>
+              </View>
+              <Text style={[styles.paymentCardAmount, { color: '#EA580C' }]}>₹{summary.bob.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</Text>
+              <Text style={styles.paymentCardNote}>Bank of Baroda QR</Text>
+            </View>
+
+            <View style={[styles.paymentCard, { borderLeftColor: '#003C8F', borderLeftWidth: 4 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Icon name="card" size={16} color="#003C8F" />
+                <Text style={styles.paymentCardLabel}>ATM / POS स्वाइप</Text>
+              </View>
+              <Text style={[styles.paymentCardAmount, { color: '#003C8F' }]}>₹{summary.atm.toLocaleString('en-IN', { maximumFractionDigits: 0 })}</Text>
+              <Text style={styles.paymentCardNote}>Card Swipe Machine</Text>
             </View>
 
             <View style={styles.paymentCard}>
@@ -1702,13 +2093,26 @@ export default function ReportsScreen() {
               {allSalaryAdvanceEntries.map((item, idx) => (
                 <View key={idx} style={styles.salaryItemRow}>
                   <View style={{ flex: 1 }}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                       <View style={styles.salaryStaffBadge}>
                         <Text style={styles.salaryStaffBadgeText}>
                           {(item.recipientName || 'S').charAt(0).toUpperCase()}
                         </Text>
                       </View>
                       <Text style={styles.itemizedPartyName}>{item.recipientName}</Text>
+                      {item.staffType === 'watchman' ? (
+                        <View style={{ backgroundColor: '#DBEAFE', borderColor: '#93C5FD', borderWidth: 1, paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 5 }}>
+                          <Text style={{ fontSize: 9.5, fontWeight: '800', color: '#1E40AF' }}>🛡️ चौकीदार</Text>
+                        </View>
+                      ) : item.staffType === 'sweeper' ? (
+                        <View style={{ backgroundColor: '#D1FAE5', borderColor: '#6EE7B7', borderWidth: 1, paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 5 }}>
+                          <Text style={{ fontSize: 9.5, fontWeight: '800', color: '#065F46' }}>🧹 सफाईकर्मी</Text>
+                        </View>
+                      ) : (
+                        <View style={{ backgroundColor: '#EFF6FF', borderColor: '#BFDBFE', borderWidth: 1, paddingHorizontal: 6, paddingVertical: 1.5, borderRadius: 5 }}>
+                          <Text style={{ fontSize: 9.5, fontWeight: '800', color: '#003C8F' }}>⛽ सेल्समैन</Text>
+                        </View>
+                      )}
                     </View>
                     <Text style={styles.itemizedStaffName}>
                       {item.notes ? `${item.notes} • ` : ''}Shift: {item.shiftStaff} {item.machineName !== '-' ? `(${item.machineName})` : ''}
@@ -1756,6 +2160,7 @@ export default function ReportsScreen() {
     const pOpening = String(item.petrolOpeningMeter || item.openingMeterReading || '0.0000');
     const pClosing = String(item.petrolClosingMeter || item.closingMeterReading || '0.0000');
     const pTesting = Number(item.petrolTesting ?? (item.fuelType === 'Petrol' ? item.testingQuantity : 0) ?? 0);
+    const pOfficial = Number(item.petrolOfficialTesting ?? item.petrolEntry?.officialTesting ?? 0);
     const pSold = Number(item.petrolQuantitySold ?? (item.fuelType === 'Petrol' ? item.totalQuantitySold : 0) ?? 0);
     const pRate = Number(item.petrolRate || (item.fuelType === 'Petrol' ? item.fuelRate : 0) || 0);
     const pExpected = Number(item.petrolExpectedAmount ?? (pSold * pRate) ?? 0);
@@ -1767,6 +2172,7 @@ export default function ReportsScreen() {
     const dOpening = String(item.dieselOpeningMeter || '0.0000');
     const dClosing = String(item.dieselClosingMeter || '0.0000');
     const dTesting = Number(item.dieselTesting ?? (item.fuelType === 'Diesel' ? item.testingQuantity : 0) ?? 0);
+    const dOfficial = Number(item.dieselOfficialTesting ?? item.dieselEntry?.officialTesting ?? 0);
     const dSold = Number(item.dieselQuantitySold ?? (item.fuelType === 'Diesel' ? item.totalQuantitySold : 0) ?? 0);
     const dRate = Number(item.dieselRate || (item.fuelType === 'Diesel' ? item.fuelRate : 0) || 0);
     const dExpected = Number(item.dieselExpectedAmount ?? (dSold * dRate) ?? 0);
@@ -1798,9 +2204,16 @@ export default function ReportsScreen() {
           {/* Card Header */}
           <View style={styles.cardHeader}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.staffNameText}>
-                {staffName}
-              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap' }}>
+                <Text style={styles.staffNameText}>
+                  {staffName}
+                </Text>
+                <View style={{ marginLeft: 6, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: (pTesting > 0 || dTesting > 0) ? '#FEF3C7' : '#F1F5F9', borderWidth: 1, borderColor: (pTesting > 0 || dTesting > 0) ? '#FDE68A' : '#CBD5E1' }}>
+                  <Text style={{ color: (pTesting > 0 || dTesting > 0) ? '#92400E' : '#475569', fontSize: 10, fontWeight: '800' }}>
+                    {(pTesting > 0 || dTesting > 0) ? '☀️ Shift 1 (Testing Add)' : '🌙 Shift 2 (No Testing)'}
+                  </Text>
+                </View>
+              </View>
               <Text style={styles.timeText}>
                 Machine: <Text style={{ fontWeight: 'bold', color: '#1E293B' }}>{machineName}</Text> • {startTime !== 'N/A' ? `Shift: ${startTime} – ${endTime}` : `Logged: ${endTime}`}
               </Text>
@@ -1815,22 +2228,17 @@ export default function ReportsScreen() {
             </View>
           </View>
           
-          {/* Fuel Volumes & Testing Summary Strip */}
+          {/* Fuel Volumes & Testing Summary Strip (Strictly Separate Petrol & Diesel) */}
           <View style={styles.shiftFuelStatsRow}>
-            <View style={styles.shiftFuelBox}>
-              <Text style={styles.shiftFuelLabel}>⛽ Petrol Sold</Text>
+            <View style={[styles.shiftFuelBox, { flex: 1 }]}>
+              <Text style={styles.shiftFuelLabel}>⛽ Petrol Sold (MS)</Text>
               <Text style={[styles.shiftFuelVal, { color: '#EA580C' }]}>{pSold.toFixed(2)} L</Text>
-              <Text style={styles.shiftFuelSub}>Test: {pTesting.toFixed(1)} L</Text>
+              <Text style={styles.shiftFuelSub}>Test: {pTesting.toFixed(1)} L{pOfficial > 0 ? ` (Off: ${pOfficial}L)` : ''}</Text>
             </View>
-            <View style={styles.shiftFuelBox}>
-              <Text style={styles.shiftFuelLabel}>🛢️ Diesel Sold</Text>
+            <View style={[styles.shiftFuelBox, { flex: 1 }]}>
+              <Text style={styles.shiftFuelLabel}>🛢️ Diesel Sold (HSD)</Text>
               <Text style={[styles.shiftFuelVal, { color: '#0284C7' }]}>{dSold.toFixed(2)} L</Text>
-              <Text style={styles.shiftFuelSub}>Test: {dTesting.toFixed(1)} L</Text>
-            </View>
-            <View style={styles.shiftFuelBox}>
-              <Text style={styles.shiftFuelLabel}>📊 Total Sold</Text>
-              <Text style={[styles.shiftFuelVal, { color: '#0F172A' }]}>{totalLitersSold.toFixed(2)} L</Text>
-              <Text style={styles.shiftFuelSub}>Test: {totalTesting.toFixed(1)} L</Text>
+              <Text style={styles.shiftFuelSub}>Test: {dTesting.toFixed(1)} L{dOfficial > 0 ? ` (Off: ${dOfficial}L)` : ''}</Text>
             </View>
           </View>
 
@@ -1961,6 +2369,30 @@ export default function ReportsScreen() {
               </Text>
             </View>
 
+            {/* Additional Mobil Sale Section */}
+            {Number(item.totalMobilAmount || 0) > 0 && (
+              <View style={[styles.sectionBlock, { borderLeftWidth: 3, borderLeftColor: '#7C3AED', paddingLeft: 8, backgroundColor: '#FAF5FF', borderRadius: 6, paddingVertical: 8, marginTop: 8 }]}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <Icon name="color-palette-outline" size={16} color="#7C3AED" style={{ marginRight: 6 }} />
+                    <Text style={[styles.sectionTitle, { color: '#7C3AED', marginBottom: 0 }]}>मोबिल बिक्री (Mobil Sale):</Text>
+                  </View>
+                  <Text style={[styles.breakdownValue, { color: '#7C3AED', fontWeight: 'bold' }]}>
+                    ₹{Number(item.totalMobilAmount).toLocaleString('en-IN')}
+                  </Text>
+                </View>
+                {item.mobilEntries && item.mobilEntries.length > 0 && (
+                  <View style={{ marginTop: 4 }}>
+                    {item.mobilEntries.map((m, mi) => (
+                      <Text key={mi} style={{ fontSize: 11, color: '#4B5563', marginBottom: 2 }}>
+                        • {m.packSize || 'मोबिल'}: {m.quantity || 1} Pcs — ₹{m.amount}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+
             {/* 3. Realized Collections */}
             <View style={styles.sectionBlock}>
               <Text style={styles.sectionTitle}>Realized Collections</Text>
@@ -1974,18 +2406,53 @@ export default function ReportsScreen() {
                 <Text style={styles.breakdownLabel}>Digital / Online Payments:</Text>
                 <Text style={[styles.breakdownValue, { color: '#0284C7' }]}>₹{onlineAmt.toLocaleString('en-IN')}</Text>
               </View>
-              {Number(item.phonePeAmount || 0) > 0 && (
-                <Text style={styles.subDetailText}>  • PhonePe: ₹{item.phonePeAmount}</Text>
-              )}
-              {Number(item.paytmAmount || 0) > 0 && (
-                <Text style={styles.subDetailText}>  • Paytm: ₹{item.paytmAmount}</Text>
-              )}
-              {Number(item.bharatPeAmount || 0) > 0 && (
-                <Text style={styles.subDetailText}>  • BharatPe: ₹{item.bharatPeAmount}</Text>
-              )}
-              {(Number(item.atmAmount || 0) + Number(item.debitCardAmount || 0) + Number(item.creditCardAmount || 0)) > 0 && (
-                <Text style={styles.subDetailText}>  • ATM / Card Swipes: ₹{Number(item.atmAmount || 0) + Number(item.debitCardAmount || 0) + Number(item.creditCardAmount || 0)}</Text>
-              )}
+              {/* Detailed Digital Modes */}
+              {(() => {
+                let pPhone = Number(item.phonePeAmount || 0);
+                let pPaytm = Number(item.paytmAmount || 0);
+                let pBob = Number(item.bobAmount || 0);
+                let pAtm = (Number(item.atmAmount || 0)) + (Number(item.debitCardAmount || 0)) + (Number(item.creditCardAmount || 0));
+                let pBharat = Number(item.bharatPeAmount || 0);
+
+                const dList = Array.isArray(item.digitalPaymentsBreakdown) ? item.digitalPaymentsBreakdown : (Array.isArray(item.digitalEntries) ? item.digitalEntries : []);
+                dList.forEach(d => {
+                  const amt = parseFloat(d.amount) || 0;
+                  const id = (d.id || d.modeId || '').toLowerCase();
+                  const name = (d.name || '').toLowerCase();
+                  if (amt > 0) {
+                    if (id.includes('bob') || name.includes('bob') || name.includes('baroda')) pBob = Math.max(pBob, amt);
+                    else if (id.includes('paytm') || name.includes('paytm')) pPaytm = Math.max(pPaytm, amt);
+                    else if (id.includes('phone') || name.includes('phone')) pPhone = Math.max(pPhone, amt);
+                    else if (id.includes('atm') || id.includes('pos') || name.includes('atm') || name.includes('pos') || name.includes('card')) pAtm = Math.max(pAtm, amt);
+                    else if (id.includes('bharat') || name.includes('bharat')) pBharat = Math.max(pBharat, amt);
+                  }
+                });
+
+                const otherDigitalList = dList.filter(d => {
+                  const amt = parseFloat(d.amount) || 0;
+                  const id = (d.id || d.modeId || '').toLowerCase();
+                  const name = (d.name || '').toLowerCase();
+                  const isStandard = id.includes('bob') || name.includes('bob') || name.includes('baroda') ||
+                                     id.includes('paytm') || name.includes('paytm') ||
+                                     id.includes('phone') || name.includes('phone') ||
+                                     id.includes('atm') || id.includes('pos') || name.includes('atm') || name.includes('pos') || name.includes('card') ||
+                                     id.includes('bharat') || name.includes('bharat');
+                  return amt > 0 && !isStandard;
+                });
+
+                return (
+                  <View style={{ marginTop: 2 }}>
+                    {pPhone > 0 && <Text style={styles.subDetailText}>  • PhonePe: ₹{pPhone.toFixed(0)}</Text>}
+                    {pPaytm > 0 && <Text style={styles.subDetailText}>  • Paytm: ₹{pPaytm.toFixed(0)}</Text>}
+                    {pBob > 0 && <Text style={[styles.subDetailText, { color: '#EA580C', fontWeight: 'bold' }]}>  • BOB Bank: ₹{pBob.toFixed(0)}</Text>}
+                    {pAtm > 0 && <Text style={[styles.subDetailText, { color: '#003C8F', fontWeight: 'bold' }]}>  • ATM / POS स्वाइप: ₹{pAtm.toFixed(0)}</Text>}
+                    {pBharat > 0 && <Text style={styles.subDetailText}>  • BharatPe: ₹{pBharat.toFixed(0)}</Text>}
+                    {otherDigitalList.map((od, odIdx) => (
+                      <Text key={odIdx} style={styles.subDetailText}>  • {od.name || 'Other Digital'}: ₹{parseFloat(od.amount).toFixed(0)}</Text>
+                    ))}
+                  </View>
+                );
+              })()}
             </View>
 
             {/* 4. Deductions (Udhari & Expenses & Staff Salary Advances) */}
@@ -2284,6 +2751,59 @@ export default function ReportsScreen() {
           ) : null}
         </View>
 
+        {/* Attached Delivery / Sample Photos */}
+        {Array.isArray(item.imageUrls) && item.imageUrls.length > 0 && (
+          <View style={styles.additionPhotosSection}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Icon name="images" size={15} color="#003C8F" style={{ marginRight: 5 }} />
+                <Text style={styles.additionPhotosTitle}>
+                  डिलीवरी फ़ोटो ({item.imageUrls.length} Photos)
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={styles.viewFullPhotosBtn}
+                activeOpacity={0.8}
+                onPress={() => {
+                  setImageViewerData({
+                    visible: true,
+                    images: item.imageUrls,
+                    initialIndex: 0,
+                    title: `Tanker ${item.tankerNumber || ''} Delivery Photos`
+                  });
+                }}
+              >
+                <Icon name="expand-outline" size={13} color="#FFFFFF" style={{ marginRight: 4 }} />
+                <Text style={styles.viewFullPhotosBtnText}>View Images ({item.imageUrls.length})</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Thumbnail Scroll */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+              {item.imageUrls.map((url, imgIdx) => (
+                <TouchableOpacity
+                  key={imgIdx}
+                  activeOpacity={0.8}
+                  onPress={() => {
+                    setImageViewerData({
+                      visible: true,
+                      images: item.imageUrls,
+                      initialIndex: imgIdx,
+                      title: `Tanker ${item.tankerNumber || ''} • Photo ${imgIdx + 1}`
+                    });
+                  }}
+                  style={styles.additionThumbWrap}
+                >
+                  <Image source={{ uri: url }} style={styles.additionThumbImg} resizeMode="cover" />
+                  <View style={styles.additionThumbZoomHint}>
+                    <Icon name="search" size={11} color="#FFFFFF" />
+                  </View>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        )}
+
         {/* Footer */}
         <View style={styles.additionCardFooter}>
           <Text style={styles.footerOperatorText}>Received by: <Text style={{ fontWeight: 'bold' }}>{item.operatorName || '—'}</Text></Text>
@@ -2301,7 +2821,7 @@ export default function ReportsScreen() {
           <Text style={styles.topHeaderTitle}>Daily Audit Report</Text>
           <Text style={styles.topHeaderSub}>Official pump sales & financial ledger</Text>
         </View>
-        {activeTab === 'sales' && salesData.length > 0 && (
+        {activeTab === 'sales' && (salesData.length > 0 || salaryAdvancesData.length > 0) && (
           <TouchableOpacity style={styles.topExportBtn} onPress={generatePDF} activeOpacity={0.8}>
             <Icon name="cloud-download-outline" size={16} color="#fff" style={{ marginRight: 6 }} />
             <Text style={styles.topExportBtnText}>Export PDF</Text>
@@ -2349,7 +2869,7 @@ export default function ReportsScreen() {
           activeOpacity={0.8}
         >
           <Icon name="calendar-outline" size={18} color="#003C8F" style={{ marginRight: 8 }} />
-          <Text style={styles.dateCenterBtnText}>
+          <Text style={styles.dateCenterBtnText} numberOfLines={1}>
             {selectedDate.toLocaleDateString('en-IN', {
               weekday: 'short',
               day: '2-digit',
@@ -2435,6 +2955,15 @@ export default function ReportsScreen() {
           ListFooterComponent={fetchingMore ? <ActivityIndicator size="small" color="#003C8F" style={{ marginVertical: 15 }} /> : null}
         />
       )}
+
+      {/* Fullscreen Interactive Zoomable Image Viewer */}
+      <ImageViewerModal
+        visible={imageViewerData.visible}
+        images={imageViewerData.images}
+        initialIndex={imageViewerData.initialIndex}
+        title={imageViewerData.title}
+        onClose={() => setImageViewerData(prev => ({ ...prev, visible: false }))}
+      />
     </View>
   );
 }
@@ -2536,7 +3065,8 @@ const styles = StyleSheet.create({
   dateCenterBtnText: {
     fontSize: 14,
     fontWeight: 'bold',
-    color: '#1E293B'
+    color: '#1E293B',
+    flexShrink: 1
   },
   todayQuickBtn: {
     backgroundColor: '#003C8F',
@@ -3603,5 +4133,57 @@ const styles = StyleSheet.create({
   machineRevenueText: {
     fontSize: 11,
     color: '#64748B'
+  },
+
+  // Fuel Addition Delivery Photos
+  additionPhotosSection: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 10,
+    marginTop: 10
+  },
+  additionPhotosTitle: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#003C8F'
+  },
+  viewFullPhotosBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#003C8F',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6
+  },
+  viewFullPhotosBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700'
+  },
+  additionThumbWrap: {
+    width: 62,
+    height: 62,
+    borderRadius: 6,
+    overflow: 'hidden',
+    position: 'relative',
+    borderWidth: 1,
+    borderColor: '#CBD5E1'
+  },
+  additionThumbImg: {
+    width: '100%',
+    height: '100%'
+  },
+  additionThumbZoomHint: {
+    position: 'absolute',
+    bottom: 2,
+    right: 2,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center'
   }
 });

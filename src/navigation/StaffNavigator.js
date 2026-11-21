@@ -6,9 +6,10 @@ import Icon from '@expo/vector-icons/Ionicons';
 import { AuthContext } from '../context/AuthContext';
 
 import DailyEntryScreen from '../screens/salesman/DailyEntry/DailyEntryScreen';
+import ReportsScreen from '../screens/owner/Reports/ReportsScreen';
+import OnloadScreen from '../screens/common/Onload/OnloadScreen';
+import DailyPhotosScreen from '../screens/salesman/DailyPhotos/DailyPhotosScreen';
 import StaffHistoryScreen from '../screens/salesman/History/StaffHistoryScreen';
-import SampleLabelScreen from '../screens/common/SampleLabel/SampleLabelScreen';
-import AddStockScreen from '../screens/owner/AddStock/AddStockScreen';
 
 const Tab = createBottomTabNavigator();
 
@@ -61,12 +62,14 @@ export default function StaffNavigator({ navigation }) {
           let iconName;
           if (route.name === 'DailyEntry') {
             iconName = focused ? 'create' : 'create-outline';
-          } else if (route.name === 'AddStock') {
-            iconName = focused ? 'water' : 'water-outline';
+          } else if (route.name === 'Reports') {
+            iconName = focused ? 'document-text' : 'document-text-outline';
+          } else if (route.name === 'Onload') {
+            iconName = focused ? 'funnel' : 'funnel-outline';
+          } else if (route.name === 'DailyPhotos') {
+            iconName = focused ? 'camera' : 'camera-outline';
           } else if (route.name === 'StaffHistory') {
             iconName = focused ? 'time' : 'time-outline';
-          } else if (route.name === 'SampleLabel') {
-            iconName = focused ? 'flask' : 'flask-outline';
           }
           return <Icon name={iconName} size={22} color={color} />;
         },
@@ -91,19 +94,24 @@ export default function StaffNavigator({ navigation }) {
         options={{ tabBarLabel: 'Daily Entry' }} 
       />
       <Tab.Screen 
-        name="AddStock" 
-        component={AddStockScreen} 
-        options={{ tabBarLabel: 'Add Fuel' }} 
+        name="Reports" 
+        component={ReportsScreen} 
+        options={{ tabBarLabel: 'Reports' }} 
+      />
+      <Tab.Screen 
+        name="Onload" 
+        component={OnloadScreen} 
+        options={{ tabBarLabel: 'Onload' }} 
+      />
+      <Tab.Screen 
+        name="DailyPhotos" 
+        component={DailyPhotosScreen} 
+        options={{ tabBarLabel: 'Photos' }} 
       />
       <Tab.Screen 
         name="StaffHistory" 
         component={StaffHistoryScreen} 
         options={{ tabBarLabel: 'History' }} 
-      />
-      <Tab.Screen 
-        name="SampleLabel" 
-        component={SampleLabelScreen} 
-        options={{ tabBarLabel: 'Sample Label' }} 
       />
     </Tab.Navigator>
   );

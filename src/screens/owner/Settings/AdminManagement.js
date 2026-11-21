@@ -341,7 +341,7 @@ export default function AdminManagement() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8FAFC' },
-  scrollContent: { padding: 15, paddingBottom: 40 },
+  scrollContent: { padding: 15, paddingBottom: 220 },
   topCard: {
     backgroundColor: '#fff',
     borderRadius: 12,

@@ -2,32 +2,30 @@
   "expo": {
     "name": "IOCL-Pump-Management",
     "slug": "baijnathsoftware",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "sdkVersion": "57.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
-    },
     "ios": {
       "supportsTablet": true
     },
     "android": {
+      "userInterfaceStyle": "light",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "splash": {
-        "image": "./assets/splash-icon.png",
-        "resizeMode": "contain",
-        "backgroundColor": "#ffffff"
-      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.RECORD_AUDIO"
+      ],
       "package": "com.baijnathsoftwaresteam.baijnathsoftware",
-      "versionCode": 2,
-      "softwareKeyboardLayoutMode": "resize"
+      "versionCode": 3,
+      "softwareKeyboardLayoutMode": "pan"
     },
     "web": {
       "favicon": "./assets/pump-logo.png"
@@ -45,13 +43,20 @@
           "backgroundColor": "#ffffff"
         }
       ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app accesses your photos to let you share them with your team.",
+          "cameraPermission": "The app accesses your camera to let you take photos of meter readings and pump."
+        }
+      ],
       "expo-font"
     ],
+    "owner": "hello11app",
     "extra": {
       "eas": {
-        "projectId": "ec3fe1d2-0bb9-42a1-b9c5-eb4abda2918d"
+        "projectId": "719f1db3-5df0-4c32-9c52-598a0a0e0b79"
       }
-    },
-    "owner": "codewebx"
+    }
   }
 }
